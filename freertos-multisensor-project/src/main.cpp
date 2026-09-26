@@ -12,6 +12,12 @@
 #define MONITOR_TASK_PRIORITY 3
 #define MONITOR_TASK_PERIOD_MS 500
 
+// Continuously running processing task (lab step 19).
+#define PROCESSING_TASK_PRIORITY 2
+#define PROCESSING_BATCH_SIZE 5000   // loop iterations per batch: finite work per pass
+#define PROCESSING_TASK_BLOCK_MS 100 // blocked time after every batch
+#define PROCESSING_LOG_EVERY 10      // log one batch in ten, about once a second
+
 UART_HandleTypeDef huart1;
 static SemaphoreHandle_t uartMutex;
 static TaskHandle_t sensorTaskHandle;
@@ -135,6 +141,48 @@ void StateMonitorTask(void *pvParameters)
     }
 }
 
+// Placeholder for continuous data processing (e.g. filtering sensor samples)
+// until real sensors are wired up. The loop bound is fixed, so each call does
+// a finite amount of work.
+static uint32_t processBatch(uint32_t state)
+{
+    for (uint32_t i = 0; i < PROCESSING_BATCH_SIZE; i++)
+    {
+        state = state * 1664525u + 1013904223u;
+    }
+    return state;
+}
+
+// --- Processing Task Definition ---
+// Its work never runs out, so a bare for (;;) { processBatch(); } would keep it
+// Ready forever and, at priority 2, starve Task A, Task B and Idle. Instead each
+// pass does one bounded batch and then blocks.
+void ProcessingTask(void *pvParameters)
+{
+    uint32_t state = 1;
+    uint32_t batches = 0;
+
+    for (;;)
+    {
+        TickType_t start = xTaskGetTickCount();
+        state = processBatch(state);
+        TickType_t elapsed = xTaskGetTickCount() - start;
+
+        if (++batches % PROCESSING_LOG_EVERY == 0)
+        {
+            logPrintf("Processing: batch #%lu took %lu ms, result %08lx",
+                      (unsigned long)batches, (unsigned long)(elapsed * portTICK_PERIOD_MS),
+                      (unsigned long)state);
+        }
+
+        // vTaskDelay, not vTaskDelayUntil: it always blocks, even after a batch
+        // that overran the period. taskYIELD() would not be enough either: it
+        // only hands the CPU to other ready priority-2 tasks, so the
+        // lower-priority tasks would still never run.
+        vTaskDelay(pdMS_TO_TICKS(PROCESSING_TASK_BLOCK_MS));
+    }
+}
+
 int main(void)
 {
     HAL_Init();
@@ -159,8 +207,10 @@ int main(void)
     BaseType_t retB = xTaskCreate(TaskB, "TaskB", 256, NULL, 1, NULL);
     BaseType_t retS = xTaskCreate(SensorTask, "Sensor", 256, NULL, SENSOR_TASK_PRIORITY, &sensorTaskHandle);
     BaseType_t retM = xTaskCreate(StateMonitorTask, "Monitor", 256, NULL, MONITOR_TASK_PRIORITY, NULL);
+    BaseType_t retP = xTaskCreate(ProcessingTask, "Process", 256, NULL, PROCESSING_TASK_PRIORITY, NULL);
 
-    if (uartMutex == NULL || retA != pdPASS || retB != pdPASS || retS != pdPASS || retM != pdPASS)
+    if (uartMutex == NULL || retA != pdPASS || retB != pdPASS || retS != pdPASS || retM != pdPASS ||
+        retP != pdPASS)
     {
         HAL_UART_Transmit(&huart1, (uint8_t *)"Task creation failed\r\n", 22, 100);
         while (1)
