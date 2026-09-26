@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "author": "Uri Shaked",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-st-nucleo-c031c6",
+      "id": "stm",
+      "attrs": {}
+    }
+  ],
+  "connections": [
+    [
+      "stm:TX",
+      "$serialMonitor:RX",
+      ""
+    ],
+    [
+      "stm:RX",
+      "$serialMonitor:TX",
+      ""
+    ]
+  ]
+}
