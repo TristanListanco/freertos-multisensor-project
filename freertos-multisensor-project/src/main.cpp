@@ -37,6 +37,24 @@ struct SensorData
     bool motionDetected; // always false: no motion sensor is wired yet
 };
 
+// Rotary encoder navigation (lab steps 28-29).
+#define INPUT_TASK_PRIORITY 3 // it only relays encoder steps, so running at once costs almost nothing
+#define ENCODER_PORT GPIOA
+#define ENCODER_CLK_PIN GPIO_PIN_1 // EXTI1 interrupt on every falling edge
+#define ENCODER_DT_PIN GPIO_PIN_2
+#define ENCODER_QUEUE_LENGTH 8 // steps the ISR can queue before InputTask catches up
+
+// The page the OLED shows (lab step 28). Clockwise moves down this list,
+// counterclockwise up, wrapping around at both ends (lab step 29).
+enum class DisplayMode
+{
+    TEMPERATURE,
+    HUMIDITY,
+    LIGHT,
+    MOTION
+};
+constexpr int DISPLAY_MODE_COUNT = static_cast<int>(DisplayMode::MOTION) + 1;
+
 UART_HandleTypeDef huart1;
 static SemaphoreHandle_t uartMutex;
 static TaskHandle_t sensorTaskHandle;
@@ -47,8 +65,17 @@ static TaskHandle_t sensorTaskHandle;
 static QueueHandle_t displayQueue;
 static QueueHandle_t alarmQueue;
 
+// Encoder steps from the EXTI1 ISR to InputTask: +1 clockwise, -1 counterclockwise.
+static QueueHandle_t encoderQueue;
+// The page InputTask selected. One slot, overwritten on every change, so
+// DisplayTask always gets the latest page and never a backlog of old ones.
+static QueueHandle_t modeQueue;
+// Lets DisplayTask block on displayQueue and modeQueue at the same time.
+static QueueSetHandle_t displayEvents;
+
 void SystemClock_Config(void);
 static void MX_USART1_UART_Init(void);
+static void MX_Encoder_Init(void);
 
 extern "C" void xPortSysTickHandler(void);
 
@@ -85,6 +112,21 @@ static void logPrintf(const char *fmt, ...)
     xSemaphoreTake(uartMutex, portMAX_DELAY);
     HAL_UART_Transmit(&huart1, (uint8_t *)line, len, 100);
     xSemaphoreGive(uartMutex);
+}
+
+static const char *modeName(DisplayMode mode)
+{
+    switch (mode)
+    {
+    case DisplayMode::TEMPERATURE:
+        return "Temperature";
+    case DisplayMode::HUMIDITY:
+        return "Humidity";
+    case DisplayMode::LIGHT:
+        return "Light";
+    default:
+        return "Motion";
+    }
 }
 
 static const char *stateName(eTaskState state)
@@ -225,30 +267,56 @@ static const char *formatDecimal(char *buf, size_t size, float value, int decima
     return buf;
 }
 
-// Draws the room monitor screen (lab step 27). One decimal place, the DHT22's
-// resolution.
-static HAL_StatusTypeDef showOnOled(const SensorData &data)
+// Draws one page: the title, the page number, the page's name and its value
+// (lab steps 27 and 29). Temperature and humidity get one decimal place, the
+// DHT22's resolution.
+static HAL_StatusTypeDef showOnOled(DisplayMode mode, const SensorData &data)
 {
-    char number[16], value[20];
-    snprintf(value, sizeof value, "%s C", formatDecimal(number, sizeof number, data.temperature, 1));
+    char number[16], value[20] = "", position[8];
+    switch (mode)
+    {
+    case DisplayMode::TEMPERATURE:
+        snprintf(value, sizeof value, "%s C", formatDecimal(number, sizeof number, data.temperature, 1));
+        break;
+    case DisplayMode::HUMIDITY:
+        snprintf(value, sizeof value, "%s %%", formatDecimal(number, sizeof number, data.humidity, 1));
+        break;
+    case DisplayMode::LIGHT:
+        if (data.lightLevel >= 0)
+        {
+            snprintf(value, sizeof value, "%d %%", data.lightLevel);
+        }
+        else
+        {
+            snprintf(value, sizeof value, "-- %%");
+        }
+        break;
+    case DisplayMode::MOTION:
+        snprintf(value, sizeof value, "%s", data.motionDetected ? "Yes" : "No");
+        break;
+    }
+    snprintf(position, sizeof position, "%d/%d", static_cast<int>(mode) + 1, DISPLAY_MODE_COUNT);
 
     ssd1306Clear();
     ssd1306DrawText(0, 0, "ROOM MONITOR", 1);
-    ssd1306DrawText(0, 24, "Temperature", 1);
+    ssd1306DrawText(SSD1306_WIDTH - 3 * SSD1306_CHAR_WIDTH, 0, position, 1);
+    ssd1306DrawText(0, 24, modeName(mode), 1);
     ssd1306DrawText(0, 36, value, 2);
     return ssd1306Update();
 }
 
 // --- Display Task Definition ---
 // First consumer, and the owner of the OLED: no other task initialises or draws
-// on it, so the display driver needs no mutex (lab step 26). Each reading also
-// goes to the serial port.
+// on it, so the display driver needs no mutex (lab step 26). It keeps the latest
+// reading and the current page, and redraws when either changes. Each reading
+// also goes to the serial port.
 void DisplayTask(void *pvParameters)
 {
     SensorData data = {NAN, NAN, -1, false};
+    DisplayMode mode = DisplayMode::TEMPERATURE;
     uint32_t received = 0;
 
-    bool oledReady = ssd1306Init() == HAL_OK && showOnOled(data) == HAL_OK;
+    bool oledReady = ssd1306Init() == HAL_OK && showOnOled(mode, data) == HAL_OK;
     if (!oledReady)
     {
         logPrintf("Display: OLED not responding, serial output only");
@@ -256,25 +324,75 @@ void DisplayTask(void *pvParameters)
 
     for (;;)
     {
-        // Blocked until SensorTask sends a reading, so this never polls.
-        xQueueReceive(displayQueue, &data, portMAX_DELAY);
-        received++;
-
-        char temperature[16], humidity[16], light[8] = "--";
-        if (data.lightLevel >= 0)
+        // Blocked until a reading or a page change arrives, so this never polls.
+        QueueSetMemberHandle_t ready = xQueueSelectFromSet(displayEvents, portMAX_DELAY);
+        if (ready == displayQueue)
         {
-            snprintf(light, sizeof light, "%d", data.lightLevel);
-        }
-        logPrintf("Display #%lu: %s C, %s %%RH, light %s %%, motion %s", (unsigned long)received,
-                  formatDecimal(temperature, sizeof temperature, data.temperature, 2),
-                  formatDecimal(humidity, sizeof humidity, data.humidity, 2), light,
-                  data.motionDetected ? "yes" : "no");
+            xQueueReceive(displayQueue, &data, 0);
+            received++;
 
-        if (oledReady && showOnOled(data) != HAL_OK)
+            char temperature[16], humidity[16], light[8] = "--";
+            if (data.lightLevel >= 0)
+            {
+                snprintf(light, sizeof light, "%d", data.lightLevel);
+            }
+            logPrintf("Display #%lu: %s C, %s %%RH, light %s %%, motion %s", (unsigned long)received,
+                      formatDecimal(temperature, sizeof temperature, data.temperature, 2),
+                      formatDecimal(humidity, sizeof humidity, data.humidity, 2), light,
+                      data.motionDetected ? "yes" : "no");
+        }
+        else
+        {
+            xQueueReceive(modeQueue, &mode, 0);
+        }
+
+        if (oledReady && showOnOled(mode, data) != HAL_OK)
         {
             logPrintf("Display: OLED update failed");
         }
     }
+}
+
+// Moves one page forward (step +1) or back (step -1), wrapping around.
+static DisplayMode stepMode(DisplayMode mode, int step)
+{
+    int index = (static_cast<int>(mode) + step + DISPLAY_MODE_COUNT) % DISPLAY_MODE_COUNT;
+    return static_cast<DisplayMode>(index);
+}
+
+// --- Input Task Definition ---
+// Owns the page selection. Blocked until the encoder ISR queues a step, then
+// moves one page and hands the new page to DisplayTask, which owns the OLED.
+void InputTask(void *pvParameters)
+{
+    DisplayMode mode = DisplayMode::TEMPERATURE;
+    int8_t step;
+
+    for (;;)
+    {
+        xQueueReceive(encoderQueue, &step, portMAX_DELAY);
+        mode = stepMode(mode, step);
+        xQueueOverwrite(modeQueue, &mode);
+        logPrintf("Input: %s, page %s", step > 0 ? "clockwise" : "counterclockwise", modeName(mode));
+    }
+}
+
+// CLK falls once per detent. DT's level at that moment gives the direction:
+// high for clockwise, low for counterclockwise.
+extern "C" void HAL_GPIO_EXTI_Callback(uint16_t pin)
+{
+    if (pin == ENCODER_CLK_PIN)
+    {
+        int8_t step = HAL_GPIO_ReadPin(ENCODER_PORT, ENCODER_DT_PIN) == GPIO_PIN_SET ? 1 : -1;
+        BaseType_t higherPriorityTaskWoken = pdFALSE;
+        xQueueSendFromISR(encoderQueue, &step, &higherPriorityTaskWoken); // dropped if the queue is full
+        portYIELD_FROM_ISR(higherPriorityTaskWoken);
+    }
+}
+
+extern "C" void EXTI1_IRQHandler(void)
+{
+    HAL_GPIO_EXTI_IRQHandler(ENCODER_CLK_PIN);
 }
 
 // --- Alarm Task Definition ---
@@ -360,6 +478,15 @@ int main(void)
     uartMutex = xSemaphoreCreateMutex();
     displayQueue = xQueueCreate(SENSOR_QUEUE_LENGTH, sizeof(SensorData));
     alarmQueue = xQueueCreate(SENSOR_QUEUE_LENGTH, sizeof(SensorData));
+    encoderQueue = xQueueCreate(ENCODER_QUEUE_LENGTH, sizeof(int8_t));
+    modeQueue = xQueueCreate(1, sizeof(DisplayMode));
+    displayEvents = xQueueCreateSet(SENSOR_QUEUE_LENGTH + 1);
+    if (displayEvents != NULL && displayQueue != NULL && modeQueue != NULL)
+    {
+        xQueueAddToSet(displayQueue, displayEvents);
+        xQueueAddToSet(modeQueue, displayEvents);
+    }
+    MX_Encoder_Init(); // after encoderQueue exists: its interrupt sends to it
 
     // Create Tasks and catch potential memory errors. 256-word stacks leave
     // room for the formatting in logPrintf.
@@ -370,10 +497,12 @@ int main(void)
     BaseType_t retP = xTaskCreate(ProcessingTask, "Process", 256, NULL, PROCESSING_TASK_PRIORITY, NULL);
     BaseType_t retD = xTaskCreate(DisplayTask, "Display", 256, NULL, DISPLAY_TASK_PRIORITY, NULL);
     BaseType_t retL = xTaskCreate(AlarmTask, "Alarm", 256, NULL, ALARM_TASK_PRIORITY, NULL);
+    BaseType_t retI = xTaskCreate(InputTask, "Input", 256, NULL, INPUT_TASK_PRIORITY, NULL);
 
-    if (uartMutex == NULL || displayQueue == NULL || alarmQueue == NULL || retA != pdPASS ||
-        retB != pdPASS || retS != pdPASS || retM != pdPASS || retP != pdPASS || retD != pdPASS ||
-        retL != pdPASS)
+    if (uartMutex == NULL || displayQueue == NULL || alarmQueue == NULL || encoderQueue == NULL ||
+        modeQueue == NULL || displayEvents == NULL || retA != pdPASS || retB != pdPASS ||
+        retS != pdPASS || retM != pdPASS || retP != pdPASS || retD != pdPASS || retL != pdPASS ||
+        retI != pdPASS)
     {
         HAL_UART_Transmit(&huart1, (uint8_t *)"Task creation failed\r\n", 22, 100);
         while (1)
@@ -422,6 +551,26 @@ static void MX_USART1_UART_Init(void)
     huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
     huart1.Init.OverSampling = UART_OVERSAMPLING_16;
     HAL_UART_Init(&huart1);
+}
+
+// --- Rotary Encoder Pins ---
+static void MX_Encoder_Init(void)
+{
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = ENCODER_CLK_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(ENCODER_PORT, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = ENCODER_DT_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    HAL_GPIO_Init(ENCODER_PORT, &GPIO_InitStruct);
+
+    // Lowest priority, the same as the kernel's own SysTick and PendSV.
+    HAL_NVIC_SetPriority(EXTI1_IRQn, 15, 0);
+    HAL_NVIC_EnableIRQ(EXTI1_IRQn);
 }
 
 // --- USART1 Hardware Pins ---

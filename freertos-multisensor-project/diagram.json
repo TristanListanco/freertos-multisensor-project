@@ -33,6 +33,13 @@
       "attrs": {
         "i2cAddress": "0x3c"
       }
+    },
+    {
+      "type": "wokwi-ky-040",
+      "id": "encoder1",
+      "top": 96,
+      "left": 326.4,
+      "attrs": {}
     }
   ],
   "connections": [
@@ -104,6 +111,30 @@
       "oled1:SDA",
       "stm:B7",
       "purple",
+      []
+    ],
+    [
+      "encoder1:VCC",
+      "stm:3V3.2",
+      "red",
+      []
+    ],
+    [
+      "encoder1:GND",
+      "stm:GND.2",
+      "black",
+      []
+    ],
+    [
+      "encoder1:CLK",
+      "stm:A1",
+      "yellow",
+      []
+    ],
+    [
+      "encoder1:DT",
+      "stm:A2",
+      "white",
       []
     ]
   ]
