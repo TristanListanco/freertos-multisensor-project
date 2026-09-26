@@ -2,8 +2,10 @@
 #include "FreeRTOS.h" // FreeRTOS definitions and time conversion macros.
 #include "task.h"     // Task creation and blocking-delay functions.
 #include "semphr.h"   // Mutex that lets tasks share the UART.
+#include "queue.h"    // Queues that carry readings from SensorTask to its consumers.
 #include "dht22.h"
 #include "ldr.h"
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,9 +22,29 @@
 #define PROCESSING_TASK_BLOCK_MS 200 // blocked time after every batch
 #define PROCESSING_LOG_EVERY 5       // log one batch in five, about once a second
 
+// Consumers of SensorTask's readings (lab step 25).
+#define DISPLAY_TASK_PRIORITY 1
+#define ALARM_TASK_PRIORITY 3 // above SensorTask: alarms are handled as soon as a reading arrives
+#define SENSOR_QUEUE_LENGTH 4 // readings a consumer can fall behind by before new ones are dropped
+
+// One set of readings, passed from SensorTask to each consumer (lab step 24).
+struct SensorData
+{
+    float temperature;   // degrees C; NAN if the DHT22 read failed
+    float humidity;      // % relative humidity; NAN if the DHT22 read failed
+    int lightLevel;      // 0-100 %, relative, not lux (see ldr.c); -1 if the read failed
+    bool motionDetected; // always false: no motion sensor is wired yet
+};
+
 UART_HandleTypeDef huart1;
 static SemaphoreHandle_t uartMutex;
 static TaskHandle_t sensorTaskHandle;
+
+// Each consumer gets its own queue. A FreeRTOS queue hands every item to exactly
+// one receiver, so if DisplayTask and AlarmTask shared one, each would see only
+// some of the readings.
+static QueueHandle_t displayQueue;
+static QueueHandle_t alarmQueue;
 
 void SystemClock_Config(void);
 static void MX_USART1_UART_Init(void);
@@ -103,19 +125,19 @@ void TaskB(void *pvParameters)
     }
 }
 
-// Reads every sensor once and logs the results.
-static void readSensors(void)
+// Reads every sensor once. Failures are logged here, where the reason is known;
+// the reading carries only a "no value" marker.
+static SensorData readSensors(void)
 {
+    SensorData data = {NAN, NAN, -1, false};
+
     int16_t temperature;
     uint16_t humidity;
     Dht22Status status = dht22Read(&temperature, &humidity);
     if (status == DHT22_OK)
     {
-        // The DHT22 reports tenths; scale to hundredths to print two decimals.
-        int t = (temperature < 0 ? -temperature : temperature) * 10;
-        int h = humidity * 10;
-        logPrintf("Sensor: Temperature: %s%d.%02d C, Humidity: %d.%02d %%",
-                  temperature < 0 ? "-" : "", t / 100, t % 100, h / 100, h % 100);
+        data.temperature = temperature / 10.0f; // the DHT22 reports tenths
+        data.humidity = humidity / 10.0f;
     }
     else
     {
@@ -125,12 +147,24 @@ static void readSensors(void)
     uint16_t light;
     if (ldrRead(&light) == HAL_OK)
     {
-        logPrintf("Sensor: Light: %d %% (ADC %d of %d)", ldrLightPercent(light), light,
-                  LDR_ADC_MAX);
+        data.lightLevel = ldrLightPercent(light);
     }
     else
     {
         logPrintf("Sensor: LDR read failed");
+    }
+
+    return data;
+}
+
+// Copies a reading into a consumer's queue. The timeout is 0: if a consumer has
+// fallen SENSOR_QUEUE_LENGTH readings behind, it misses this one rather than
+// making SensorTask late for its next period.
+static void sendReading(QueueHandle_t queue, const char *consumer, const SensorData &data)
+{
+    if (xQueueSend(queue, &data, 0) != pdPASS)
+    {
+        logPrintf("Sensor: %s queue full, reading dropped", consumer);
     }
 }
 
@@ -146,7 +180,9 @@ void SensorTask(void *pvParameters)
     {
         // RUNNING: this code only executes while SensorTask holds the CPU
         // (except for the 2-3 ms dht22Read blocks during its start signal).
-        readSensors();
+        SensorData data = readSensors();
+        sendReading(alarmQueue, "alarm", data);
+        sendReading(displayQueue, "display", data);
 
         // BLOCKED: until the next period starts, SensorTask is off the CPU and
         // lower-priority tasks (Task A, Task B, Idle) run instead. When the
@@ -169,6 +205,60 @@ void StateMonitorTask(void *pvParameters)
     {
         logPrintf("Monitor: SensorTask is %s", stateName(eTaskGetState(sensorTaskHandle)));
         vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(MONITOR_TASK_PERIOD_MS));
+    }
+}
+
+// Formats a value with two decimals, or "--" for NAN. newlib-nano's printf has
+// no %f, so this prints the rounded hundredths as integers.
+static const char *formatHundredths(char *buf, size_t size, float value)
+{
+    if (isnan(value))
+    {
+        return "--";
+    }
+    long hundredths = lroundf(value * 100.0f);
+    long magnitude = hundredths < 0 ? -hundredths : hundredths;
+    snprintf(buf, size, "%s%ld.%02ld", hundredths < 0 ? "-" : "", magnitude / 100, magnitude % 100);
+    return buf;
+}
+
+// --- Display Task Definition ---
+// First consumer. Prints each reading to the serial port until the OLED is added.
+void DisplayTask(void *pvParameters)
+{
+    SensorData data;
+    uint32_t received = 0;
+
+    for (;;)
+    {
+        // Blocked until SensorTask sends a reading, so this never polls.
+        xQueueReceive(displayQueue, &data, portMAX_DELAY);
+        received++;
+
+        char temperature[16], humidity[16], light[8] = "--";
+        if (data.lightLevel >= 0)
+        {
+            snprintf(light, sizeof light, "%d", data.lightLevel);
+        }
+        logPrintf("Display #%lu: %s C, %s %%RH, light %s %%, motion %s", (unsigned long)received,
+                  formatHundredths(temperature, sizeof temperature, data.temperature),
+                  formatHundredths(humidity, sizeof humidity, data.humidity), light,
+                  data.motionDetected ? "yes" : "no");
+    }
+}
+
+// --- Alarm Task Definition ---
+// Second consumer. It has no alarm conditions yet; for now it shows that it
+// receives every reading too: its count should match DisplayTask's.
+void AlarmTask(void *pvParameters)
+{
+    SensorData data;
+    uint32_t received = 0;
+
+    for (;;)
+    {
+        xQueueReceive(alarmQueue, &data, portMAX_DELAY);
+        logPrintf("Alarm #%lu: reading received, no alarm conditions yet", (unsigned long)++received);
     }
 }
 
@@ -238,6 +328,8 @@ int main(void)
     }
 
     uartMutex = xSemaphoreCreateMutex();
+    displayQueue = xQueueCreate(SENSOR_QUEUE_LENGTH, sizeof(SensorData));
+    alarmQueue = xQueueCreate(SENSOR_QUEUE_LENGTH, sizeof(SensorData));
 
     // Create Tasks and catch potential memory errors. 256-word stacks leave
     // room for the formatting in logPrintf.
@@ -246,9 +338,12 @@ int main(void)
     BaseType_t retS = xTaskCreate(SensorTask, "Sensor", 256, NULL, SENSOR_TASK_PRIORITY, &sensorTaskHandle);
     BaseType_t retM = xTaskCreate(StateMonitorTask, "Monitor", 256, NULL, MONITOR_TASK_PRIORITY, NULL);
     BaseType_t retP = xTaskCreate(ProcessingTask, "Process", 256, NULL, PROCESSING_TASK_PRIORITY, NULL);
+    BaseType_t retD = xTaskCreate(DisplayTask, "Display", 256, NULL, DISPLAY_TASK_PRIORITY, NULL);
+    BaseType_t retL = xTaskCreate(AlarmTask, "Alarm", 256, NULL, ALARM_TASK_PRIORITY, NULL);
 
-    if (uartMutex == NULL || retA != pdPASS || retB != pdPASS || retS != pdPASS || retM != pdPASS ||
-        retP != pdPASS)
+    if (uartMutex == NULL || displayQueue == NULL || alarmQueue == NULL || retA != pdPASS ||
+        retB != pdPASS || retS != pdPASS || retM != pdPASS || retP != pdPASS || retD != pdPASS ||
+        retL != pdPASS)
     {
         HAL_UART_Transmit(&huart1, (uint8_t *)"Task creation failed\r\n", 22, 100);
         while (1)
