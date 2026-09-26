@@ -1,4 +1,6 @@
 #include "stm32f1xx_hal.h"
+#include "FreeRTOS.h" // FreeRTOS definitions and time conversion macros.
+#include "task.h"     // Task creation and blocking-delay functions.
 #include <string.h>
 
 UART_HandleTypeDef huart1;
@@ -6,32 +8,82 @@ UART_HandleTypeDef huart1;
 void SystemClock_Config(void);
 static void MX_USART1_UART_Init(void);
 
-int main(void)
+extern "C" void xPortSysTickHandler(void);
+
+// SysTick drives the HAL tick at all times, but only feeds FreeRTOS once the
+// scheduler is running. Calling xPortSysTickHandler earlier makes the kernel
+// touch a NULL pxCurrentTCB and pend a PendSV with no task to switch to.
+extern "C" void SysTick_Handler(void)
 {
-    // Initialize the HAL Library
-    HAL_Init();
-
-    // Configure the system clock
-    SystemClock_Config();
-
-    // Initialize USART1
-    MX_USART1_UART_Init();
-
-    // Define the required laboratory messages
-    const char *msg1 = "BCA182 FreeRTOS Multisensor\r\n";
-    const char *msg2 = "System starting...\r\n";
-
-    // Transmit messages over UART
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg1, strlen(msg1), HAL_MAX_DELAY);
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg2, strlen(msg2), HAL_MAX_DELAY);
-
-    while (1)
+    HAL_IncTick();
+    if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
     {
-        // Main infinite loop
+        xPortSysTickHandler();
     }
 }
 
-// Minimal System Clock Configuration defaulting to HSI
+// --- Task A Definition ---
+void TaskA(void *pvParameters)
+{
+    const char *msg = "Task A running\r\n";
+    for (;;)
+    {
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+// --- Task B Definition ---
+void TaskB(void *pvParameters)
+{
+    const char *msg = "Task B running\r\n";
+    // Offset slightly so Task A and Task B don't try to print at the exact same millisecond
+    vTaskDelay(pdMS_TO_TICKS(500));
+    for (;;)
+    {
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+        vTaskDelay(pdMS_TO_TICKS(1500));
+    }
+}
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+
+    // Crucial: Update internal clock variable so FreeRTOS calculates ticks correctly
+    SystemCoreClockUpdate();
+
+    MX_USART1_UART_Init();
+
+    const char *msg1 = "BCA182 FreeRTOS Multisensor\r\n";
+    const char *msg2 = "System starting...\r\n";
+
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg1, strlen(msg1), 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg2, strlen(msg2), 100);
+
+    // Create Tasks and catch potential memory errors
+    BaseType_t retA = xTaskCreate(TaskA, "TaskA", 128, NULL, 1, NULL);
+    BaseType_t retB = xTaskCreate(TaskB, "TaskB", 128, NULL, 1, NULL);
+
+    if (retA != pdPASS || retB != pdPASS)
+    {
+        HAL_UART_Transmit(&huart1, (uint8_t *)"Task creation failed\r\n", 22, 100);
+        while (1)
+            ;
+    }
+
+    // Hand over control to FreeRTOS
+    vTaskStartScheduler();
+
+    // If memory runs out before the scheduler starts, it falls down here
+    HAL_UART_Transmit(&huart1, (uint8_t *)"Scheduler failed to start!\r\n", 28, 100);
+    while (1)
+    {
+    }
+}
+
+// --- Minimal System Clock Configuration defaulting to HSI ---
 void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -51,7 +103,7 @@ void SystemClock_Config(void)
     HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0);
 }
 
-// USART1 Initialization code
+// --- USART1 Initialization ---
 static void MX_USART1_UART_Init(void)
 {
     huart1.Instance = USART1;
@@ -65,7 +117,7 @@ static void MX_USART1_UART_Init(void)
     HAL_UART_Init(&huart1);
 }
 
-// Hardware initialization for USART1 pins (PA9 and PA10)
+// --- USART1 Hardware Pins ---
 extern "C" void HAL_UART_MspInit(UART_HandleTypeDef *uartHandle)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
