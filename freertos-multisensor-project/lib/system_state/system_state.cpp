@@ -1,7 +1,7 @@
 #include "system_state.h"
 
-SystemState nextSystemState(SystemState current, bool motion, uint32_t msSinceMotion,
-                            uint32_t timeoutMs)
+SystemState evaluateSystemState(SystemState current, bool motion, uint32_t msSinceMotion,
+                                uint32_t timeoutMs)
 {
     if (motion)
     {

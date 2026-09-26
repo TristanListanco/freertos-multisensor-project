@@ -19,8 +19,8 @@ enum class SystemState
 //   motion:        the PIR output is high right now.
 //   msSinceMotion: time since the PIR output was last seen high.
 //   timeoutMs:     inactivity timeout.
-SystemState nextSystemState(SystemState current, bool motion, uint32_t msSinceMotion,
-                            uint32_t timeoutMs);
+SystemState evaluateSystemState(SystemState current, bool motion, uint32_t msSinceMotion,
+                                uint32_t timeoutMs);
 
 const char *systemStateName(SystemState state);
 

@@ -1,34 +1,47 @@
-// Host-side unit tests for the alarm decision logic (lab step 30).
+// Host-side unit tests for the temperature alarm logic (lab steps 30 and 43).
 // Run with: pio test -e native
+//
+// The normal range is ALARM_LOW_TEMPERATURE_C (18.0) to ALARM_HIGH_TEMPERATURE_C
+// (30.0), inclusive. 0.1 C is the DHT22's resolution, so 17.9 and 30.1 are the
+// nearest readings outside it.
 
 #include <unity.h>
 #include "alarm_logic.h"
 
-#define ASSERT_STATE(expected, actual) \
-    TEST_ASSERT_EQUAL_STRING(alarmStateName(expected), alarmStateName(actual))
+// Compares the enum values themselves; on failure the message names the state
+// actually returned.
+#define ASSERT_STATE(expected, actual)                                                  \
+    do                                                                                  \
+    {                                                                                   \
+        AlarmState result = (actual);                                                   \
+        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(expected), static_cast<int>(result), \
+                                      alarmStateName(result));                          \
+    } while (0)
 
 void setUp(void) {}
 void tearDown(void) {}
 
-static void test_typical_room_temperature_is_normal(void)
-{
-    ASSERT_STATE(AlarmState::NORMAL, evaluateTemperature(25.4f));
-}
-
-static void test_thresholds_themselves_are_normal(void)
-{
-    ASSERT_STATE(AlarmState::NORMAL, evaluateTemperature(ALARM_LOW_TEMPERATURE_C));
-    ASSERT_STATE(AlarmState::NORMAL, evaluateTemperature(ALARM_HIGH_TEMPERATURE_C));
-}
-
-// 0.1 C is the DHT22's resolution, so these are the nearest readings outside
-// the normal range.
-static void test_one_step_below_low_threshold_is_low(void)
+static void test_below_lower_threshold_is_low(void)
 {
     ASSERT_STATE(AlarmState::LOW_TEMPERATURE, evaluateTemperature(17.9f));
 }
 
-static void test_one_step_above_high_threshold_is_high(void)
+static void test_exactly_lower_threshold_is_normal(void)
+{
+    ASSERT_STATE(AlarmState::NORMAL, evaluateTemperature(ALARM_LOW_TEMPERATURE_C));
+}
+
+static void test_normal_value_is_normal(void)
+{
+    ASSERT_STATE(AlarmState::NORMAL, evaluateTemperature(25.4f));
+}
+
+static void test_exactly_upper_threshold_is_normal(void)
+{
+    ASSERT_STATE(AlarmState::NORMAL, evaluateTemperature(ALARM_HIGH_TEMPERATURE_C));
+}
+
+static void test_above_upper_threshold_is_high(void)
 {
     ASSERT_STATE(AlarmState::HIGH_TEMPERATURE, evaluateTemperature(30.1f));
 }
@@ -44,28 +57,21 @@ static void test_sensor_range_extremes(void)
 // sure that arithmetic doesn't push a boundary reading across the threshold.
 static void test_boundaries_as_built_from_dht22_tenths(void)
 {
-    ASSERT_STATE(AlarmState::NORMAL, evaluateTemperature(180 / 10.0f));
     ASSERT_STATE(AlarmState::LOW_TEMPERATURE, evaluateTemperature(179 / 10.0f));
+    ASSERT_STATE(AlarmState::NORMAL, evaluateTemperature(180 / 10.0f));
     ASSERT_STATE(AlarmState::NORMAL, evaluateTemperature(300 / 10.0f));
     ASSERT_STATE(AlarmState::HIGH_TEMPERATURE, evaluateTemperature(301 / 10.0f));
-}
-
-static void test_state_names(void)
-{
-    TEST_ASSERT_EQUAL_STRING("NORMAL", alarmStateName(AlarmState::NORMAL));
-    TEST_ASSERT_EQUAL_STRING("LOW_TEMPERATURE", alarmStateName(AlarmState::LOW_TEMPERATURE));
-    TEST_ASSERT_EQUAL_STRING("HIGH_TEMPERATURE", alarmStateName(AlarmState::HIGH_TEMPERATURE));
 }
 
 int main(int argc, char **argv)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_typical_room_temperature_is_normal);
-    RUN_TEST(test_thresholds_themselves_are_normal);
-    RUN_TEST(test_one_step_below_low_threshold_is_low);
-    RUN_TEST(test_one_step_above_high_threshold_is_high);
+    RUN_TEST(test_below_lower_threshold_is_low);
+    RUN_TEST(test_exactly_lower_threshold_is_normal);
+    RUN_TEST(test_normal_value_is_normal);
+    RUN_TEST(test_exactly_upper_threshold_is_normal);
+    RUN_TEST(test_above_upper_threshold_is_high);
     RUN_TEST(test_sensor_range_extremes);
     RUN_TEST(test_boundaries_as_built_from_dht22_tenths);
-    RUN_TEST(test_state_names);
     return UNITY_END();
 }
