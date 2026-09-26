@@ -6,6 +6,7 @@
 #include "dht22.h"
 #include "ldr.h"
 #include "ssd1306.h"
+#include "alarm_logic.h"
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -396,8 +397,10 @@ extern "C" void EXTI1_IRQHandler(void)
 }
 
 // --- Alarm Task Definition ---
-// Second consumer. It has no alarm conditions yet; for now it shows that it
-// receives every reading too: its count should match DisplayTask's.
+// Second consumer. The decision itself is evaluateTemperature in
+// lib/alarm_logic, which has no hardware code and is unit tested on the host;
+// this task only feeds it readings. No buzzer yet: the state goes to the serial
+// port. The count should match DisplayTask's.
 void AlarmTask(void *pvParameters)
 {
     SensorData data;
@@ -406,7 +409,17 @@ void AlarmTask(void *pvParameters)
     for (;;)
     {
         xQueueReceive(alarmQueue, &data, portMAX_DELAY);
-        logPrintf("Alarm #%lu: reading received, no alarm conditions yet", (unsigned long)++received);
+        received++;
+
+        if (isnan(data.temperature))
+        {
+            logPrintf("Alarm #%lu: no temperature reading, not evaluated", (unsigned long)received);
+            continue;
+        }
+        char temperature[16];
+        logPrintf("Alarm #%lu: %s C -> %s", (unsigned long)received,
+                  formatDecimal(temperature, sizeof temperature, data.temperature, 1),
+                  alarmStateName(evaluateTemperature(data.temperature)));
     }
 }
 
