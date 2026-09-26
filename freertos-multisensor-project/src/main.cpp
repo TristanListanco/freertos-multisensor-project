@@ -46,7 +46,6 @@ struct SensorData
 #define INACTIVITY_TIMEOUT_MS 15000 // short, for laboratory testing
 #define PIR_PORT GPIOA
 #define PIR_PIN GPIO_PIN_3
-#define SYSTEM_ACTIVE_BIT (1u << 0) // set in systemEvents while the system is ACTIVE
 
 // Rotary encoder navigation (lab steps 28-29).
 #define INPUT_TASK_PRIORITY 3 // it only relays encoder steps, so running at once costs almost nothing
@@ -81,10 +80,40 @@ static QueueHandle_t encoderQueue;
 // The page InputTask selected. One slot, overwritten on every change, so
 // DisplayTask always gets the latest page and never a backlog of old ones.
 static QueueHandle_t modeQueue;
-// MotionTask publishes the system state two ways. systemEvents holds it as a
-// bit that SensorTask can block on and InputTask can check. systemStateQueue
-// (one slot, overwritten) wakes DisplayTask to turn the OLED off or on.
+
+// systemEvents: system-wide event bits (lab step 35).
+//
+// EVENT_ACTIVE (bit 0): the system is ACTIVE.
+//   Producer:  MotionTask. Set at start-up and when motion ends INACTIVE;
+//              cleared when the inactivity timeout starts INACTIVE.
+//   Consumers: SensorTask blocks on it while it is clear, pausing acquisition.
+//              InputTask ignores encoder steps while it is clear.
+//
+// EVENT_MOTION (bit 1): the PIR output is high, i.e. motion now or within the
+// PIR's hold time.
+//   Producer:  MotionTask. Set when a poll finds the PIR output high, cleared
+//              when a poll finds it low. Polls are MOTION_POLL_MS apart.
+//   Consumer:  SensorTask copies it into SensorData.motionDetected, so
+//              MotionTask is the only task that reads the PIR pin.
+//
+// EVENT_ALARM (bit 2): the latest evaluated reading is outside the normal
+// temperature range.
+//   Producer:  AlarmTask. Set when a reading evaluates to LOW_TEMPERATURE or
+//              HIGH_TEMPERATURE, cleared when one evaluates to NORMAL. There
+//              are no readings while INACTIVE, so it then keeps its last value;
+//              act on it only while EVENT_ACTIVE is set too.
+//   Consumer:  DisplayTask shows an alarm banner in place of the OLED title.
+//              AlarmTask outranks SensorTask and DisplayTask, so it gets each
+//              reading and updates the bit before DisplayTask draws that
+//              reading.
+#define EVENT_ACTIVE (1u << 0)
+#define EVENT_MOTION (1u << 1)
+#define EVENT_ALARM (1u << 2)
 static EventGroupHandle_t systemEvents;
+
+// DisplayTask blocks on a queue set, which can't include an event group, so
+// MotionTask also sends each state change to it here (one slot, overwritten)
+// to turn the OLED off or on.
 static QueueHandle_t systemStateQueue;
 // Lets DisplayTask block on displayQueue, modeQueue and systemStateQueue at once.
 static QueueSetHandle_t displayEvents;
@@ -186,7 +215,7 @@ void TaskB(void *pvParameters)
 }
 
 // The PIR module drives OUT high while it senses motion, and for its hold time
-// (a few seconds) after.
+// (a few seconds) after. Only MotionTask calls this; others use EVENT_MOTION.
 static bool pirMotionDetected(void)
 {
     return HAL_GPIO_ReadPin(PIR_PORT, PIR_PIN) == GPIO_PIN_SET;
@@ -194,14 +223,14 @@ static bool pirMotionDetected(void)
 
 static bool systemIsActive(void)
 {
-    return (xEventGroupGetBits(systemEvents) & SYSTEM_ACTIVE_BIT) != 0;
+    return (xEventGroupGetBits(systemEvents) & EVENT_ACTIVE) != 0;
 }
 
 // Reads every sensor once. Failures are logged here, where the reason is known;
 // the reading carries only a "no value" marker.
 static SensorData readSensors(void)
 {
-    SensorData data = {NAN, NAN, -1, pirMotionDetected()};
+    SensorData data = {NAN, NAN, -1, (xEventGroupGetBits(systemEvents) & EVENT_MOTION) != 0};
 
     int16_t temperature;
     uint16_t humidity;
@@ -256,7 +285,7 @@ void SensorTask(void *pvParameters)
         // periods it slept through.
         if (!systemIsActive())
         {
-            xEventGroupWaitBits(systemEvents, SYSTEM_ACTIVE_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+            xEventGroupWaitBits(systemEvents, EVENT_ACTIVE, pdFALSE, pdTRUE, portMAX_DELAY);
             lastWakeTime = xTaskGetTickCount();
         }
 
@@ -336,8 +365,10 @@ static HAL_StatusTypeDef showOnOled(DisplayMode mode, const SensorData &data)
     }
     snprintf(position, sizeof position, "%d/%d", static_cast<int>(mode) + 1, DISPLAY_MODE_COUNT);
 
+    bool alarm = (xEventGroupGetBits(systemEvents) & EVENT_ALARM) != 0;
+
     ssd1306Clear();
-    ssd1306DrawText(0, 0, "ROOM MONITOR", 1);
+    ssd1306DrawText(0, 0, alarm ? "!! ALARM !!" : "ROOM MONITOR", 1);
     ssd1306DrawText(SSD1306_WIDTH - 3 * SSD1306_CHAR_WIDTH, 0, position, 1);
     ssd1306DrawText(0, 24, modeName(mode), 1);
     ssd1306DrawText(0, 36, value, 2);
@@ -434,17 +465,17 @@ void InputTask(void *pvParameters)
     }
 }
 
-// Sets systemEvents' bit and tells DisplayTask, in that order, so SensorTask
-// and InputTask see the new state before the OLED changes.
+// Updates EVENT_ACTIVE and tells DisplayTask, in that order, so SensorTask and
+// InputTask see the new state before the OLED changes.
 static void publishSystemState(SystemState state)
 {
     if (state == SystemState::ACTIVE)
     {
-        xEventGroupSetBits(systemEvents, SYSTEM_ACTIVE_BIT);
+        xEventGroupSetBits(systemEvents, EVENT_ACTIVE);
     }
     else
     {
-        xEventGroupClearBits(systemEvents, SYSTEM_ACTIVE_BIT);
+        xEventGroupClearBits(systemEvents, EVENT_ACTIVE);
     }
     xQueueOverwrite(systemStateQueue, &state);
 }
@@ -470,6 +501,11 @@ void MotionTask(void *pvParameters)
         if (motion)
         {
             lastMotion = now;
+            xEventGroupSetBits(systemEvents, EVENT_MOTION);
+        }
+        else
+        {
+            xEventGroupClearBits(systemEvents, EVENT_MOTION);
         }
 
         SystemState next = nextSystemState(state, motion, (now - lastMotion) * portTICK_PERIOD_MS,
@@ -507,8 +543,9 @@ extern "C" void EXTI1_IRQHandler(void)
 // --- Alarm Task Definition ---
 // Second consumer. The decision itself is evaluateTemperature in
 // lib/alarm_logic, which has no hardware code and is unit tested on the host;
-// this task only feeds it readings. No buzzer yet: the state goes to the serial
-// port. The count should match DisplayTask's.
+// this task feeds it readings and publishes the result as EVENT_ALARM. No
+// buzzer yet: the state also goes to the serial port. The count should match
+// DisplayTask's.
 void AlarmTask(void *pvParameters)
 {
     SensorData data;
@@ -524,10 +561,22 @@ void AlarmTask(void *pvParameters)
             logPrintf("Alarm #%lu: no temperature reading, not evaluated", (unsigned long)received);
             continue;
         }
+
+        // Update the bit before logging, which can block on the UART mutex.
+        AlarmState state = evaluateTemperature(data.temperature);
+        if (state == AlarmState::NORMAL)
+        {
+            xEventGroupClearBits(systemEvents, EVENT_ALARM);
+        }
+        else
+        {
+            xEventGroupSetBits(systemEvents, EVENT_ALARM);
+        }
+
         char temperature[16];
         logPrintf("Alarm #%lu: %s C -> %s", (unsigned long)received,
                   formatDecimal(temperature, sizeof temperature, data.temperature, 1),
-                  alarmStateName(evaluateTemperature(data.temperature)));
+                  alarmStateName(state));
     }
 }
 
