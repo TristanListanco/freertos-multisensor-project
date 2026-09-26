@@ -14,21 +14,53 @@
 #include <stdio.h>
 #include <string.h>
 
-// Scheduling parameters observed in lab step 18.
+// Task priorities (lab step 38). A higher number preempts a lower one; Idle is 0.
+// Each is set by how soon the task must run once it has work (urgency), how
+// late it may run without harm (acceptable latency), and how long its own work
+// can hold up the tasks below it.
+//
+// 3  MotionTask   Brings the system back to ACTIVE; a late poll leaves the OLED
+//                 dark after someone walks in. Aims for well under a second.
+//                 Each poll takes microseconds, so it costs the others nothing.
+// 3  InputTask    Turns an encoder step into a page change, which a user
+//                 expects within about 100 ms. Runs only when the knob turns.
+// 2  SensorTask   Periodic 2 s acquisition; a few ms of jitter in when a period
+//                 starts is harmless. The DHT22's microsecond-timed read is
+//                 protected by suspending the scheduler, not by priority.
+// 2  AlarmTask    Evaluates each new reading. Readings come every 2 s, so
+//                 responding within a fraction of a second is plenty. It must
+//                 outrank DisplayTask, so EVENT_ALARM is updated before the
+//                 reading is drawn.
+// 1  DisplayTask  A human reads the screen, so tens of ms of delay go unnoticed.
+//                 Each OLED update busy-waits about 25 ms on I2C; at the bottom
+//                 that never holds up the tasks above.
+//
+// Earlier lab exercises, kept for their demonstrations:
+// 3  StateMonitorTask  (step 18) samples SensorTask's state every 500 ms; above
+//                      it so SensorTask never delays a sample.
+// 2  ProcessingTask    (step 19) continuous work beside SensorTask, blocking
+//                      after each batch so the tasks below still run.
+// 1  TaskA, TaskB      (step 17) heartbeat prints; nothing depends on them.
+#define MOTION_TASK_PRIORITY 3
+#define INPUT_TASK_PRIORITY 3
 #define SENSOR_TASK_PRIORITY 2
-#define SENSOR_TASK_PERIOD_MS 2000 // also the DHT22's minimum time between reads
+#define ALARM_TASK_PRIORITY 2
+#define DISPLAY_TASK_PRIORITY 1
 #define MONITOR_TASK_PRIORITY 3
+#define PROCESSING_TASK_PRIORITY 2
+#define TASK_A_PRIORITY 1
+#define TASK_B_PRIORITY 1
+
+// Scheduling parameters observed in lab step 18.
+#define SENSOR_TASK_PERIOD_MS 2000 // also the DHT22's minimum time between reads
 #define MONITOR_TASK_PERIOD_MS 500
 
 // Continuously running processing task (lab step 19).
-#define PROCESSING_TASK_PRIORITY 2
 #define PROCESSING_BATCH_SIZE 5000   // loop iterations per batch: finite work per pass
 #define PROCESSING_TASK_BLOCK_MS 200 // blocked time after every batch
 #define PROCESSING_LOG_EVERY 5       // log one batch in five, about once a second
 
 // Consumers of SensorTask's readings (lab step 25).
-#define DISPLAY_TASK_PRIORITY 1
-#define ALARM_TASK_PRIORITY 3 // above SensorTask: alarms are handled as soon as a reading arrives
 #define SENSOR_QUEUE_LENGTH 4 // readings a consumer can fall behind by before new ones are dropped
 
 // One set of readings, passed from SensorTask to each consumer (lab step 24).
@@ -41,14 +73,12 @@ struct SensorData
 };
 
 // Motion and system state (lab steps 31-34).
-#define MOTION_TASK_PRIORITY 3      // wakes the system; its work per poll is tiny
 #define MOTION_POLL_MS 100          // the PIR holds its output high for seconds, so 10 Hz is plenty
 #define INACTIVITY_TIMEOUT_MS 15000 // short, for laboratory testing
 #define PIR_PORT GPIOA
 #define PIR_PIN GPIO_PIN_3
 
 // Rotary encoder navigation (lab steps 28-29).
-#define INPUT_TASK_PRIORITY 3 // it only relays encoder steps, so running at once costs almost nothing
 #define ENCODER_PORT GPIOA
 #define ENCODER_CLK_PIN GPIO_PIN_1 // EXTI1 interrupt on every falling edge
 #define ENCODER_DT_PIN GPIO_PIN_2
@@ -103,9 +133,8 @@ static QueueHandle_t modeQueue;
 //              are no readings while INACTIVE, so it then keeps its last value;
 //              act on it only while EVENT_ACTIVE is set too.
 //   Consumer:  DisplayTask shows an alarm banner in place of the OLED title.
-//              AlarmTask outranks SensorTask and DisplayTask, so it gets each
-//              reading and updates the bit before DisplayTask draws that
-//              reading.
+//              AlarmTask outranks DisplayTask, so it has handled each reading
+//              and updated the bit before DisplayTask can draw that reading.
 #define EVENT_ACTIVE (1u << 0)
 #define EVENT_MOTION (1u << 1)
 #define EVENT_ALARM (1u << 2)
@@ -143,10 +172,10 @@ extern "C" void SysTick_Handler(void)
 // serialMutex makes each line one uninterrupted transmission. Without it, a
 // task that preempted another mid-line would find the UART busy and its line
 // would be lost or mixed into the other one. It is a mutex rather than a binary
-// semaphore for priority inheritance: while a high-priority task (AlarmTask)
+// semaphore for priority inheritance: while a high-priority task (InputTask)
 // waits for a line from a low-priority one (DisplayTask), the holder runs at
-// the waiter's priority, so mid-priority tasks (ProcessingTask) can't stretch
-// the wait. The line is formatted before taking the mutex, so the mutex is held
+// the waiter's priority, so mid-priority tasks (SensorTask, ProcessingTask)
+// can't stretch the wait. The line is formatted before taking the mutex, so the mutex is held
 // only while the bytes go out (up to about 7 ms for a full line at 115200 baud).
 static void logPrintf(const char *fmt, ...)
 {
@@ -675,8 +704,8 @@ int main(void)
 
     // Create Tasks and catch potential memory errors. 256-word stacks leave
     // room for the formatting in logPrintf.
-    BaseType_t retA = xTaskCreate(TaskA, "TaskA", 256, NULL, 1, NULL);
-    BaseType_t retB = xTaskCreate(TaskB, "TaskB", 256, NULL, 1, NULL);
+    BaseType_t retA = xTaskCreate(TaskA, "TaskA", 256, NULL, TASK_A_PRIORITY, NULL);
+    BaseType_t retB = xTaskCreate(TaskB, "TaskB", 256, NULL, TASK_B_PRIORITY, NULL);
     BaseType_t retS = xTaskCreate(SensorTask, "Sensor", 256, NULL, SENSOR_TASK_PRIORITY, &sensorTaskHandle);
     BaseType_t retM = xTaskCreate(StateMonitorTask, "Monitor", 256, NULL, MONITOR_TASK_PRIORITY, NULL);
     BaseType_t retP = xTaskCreate(ProcessingTask, "Process", 256, NULL, PROCESSING_TASK_PRIORITY, NULL);
