@@ -2,21 +2,22 @@
 #include "FreeRTOS.h" // FreeRTOS definitions and time conversion macros.
 #include "task.h"     // Task creation and blocking-delay functions.
 #include "semphr.h"   // Mutex that lets tasks share the UART.
+#include "dht22.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 // Scheduling parameters observed in lab step 18.
 #define SENSOR_TASK_PRIORITY 2
-#define SENSOR_TASK_PERIOD_MS 2000
+#define SENSOR_TASK_PERIOD_MS 2000 // also the DHT22's minimum time between reads
 #define MONITOR_TASK_PRIORITY 3
 #define MONITOR_TASK_PERIOD_MS 500
 
 // Continuously running processing task (lab step 19).
 #define PROCESSING_TASK_PRIORITY 2
 #define PROCESSING_BATCH_SIZE 5000   // loop iterations per batch: finite work per pass
-#define PROCESSING_TASK_BLOCK_MS 100 // blocked time after every batch
-#define PROCESSING_LOG_EVERY 10      // log one batch in ten, about once a second
+#define PROCESSING_TASK_BLOCK_MS 200 // blocked time after every batch
+#define PROCESSING_LOG_EVERY 5       // log one batch in five, about once a second
 
 UART_HandleTypeDef huart1;
 static SemaphoreHandle_t uartMutex;
@@ -107,15 +108,26 @@ void SensorTask(void *pvParameters)
     // The scheduler starts at tick 0. StateMonitorTask uses the same reference,
     // so both wake on the same tick every SENSOR_TASK_PERIOD_MS.
     TickType_t lastWake = 0;
-    uint32_t reading = 0;
 
     for (;;)
     {
-        // RUNNING: this code only executes while SensorTask holds the CPU.
-        reading++; // placeholder until real sensors are wired up
-        logPrintf("SensorTask: %s, priority %lu, reading #%lu",
-                  stateName(eTaskGetState(sensorTaskHandle)),
-                  (unsigned long)uxTaskPriorityGet(NULL), (unsigned long)reading);
+        // RUNNING: this code only executes while SensorTask holds the CPU
+        // (except for the 2-3 ms dht22Read blocks during its start signal).
+        int16_t temperature;
+        uint16_t humidity;
+        Dht22Status status = dht22Read(&temperature, &humidity);
+        if (status == DHT22_OK)
+        {
+            // The DHT22 reports tenths; scale to hundredths to print two decimals.
+            int t = (temperature < 0 ? -temperature : temperature) * 10;
+            int h = humidity * 10;
+            logPrintf("Sensor: Temperature: %s%d.%02d C, Humidity: %d.%02d %%",
+                      temperature < 0 ? "-" : "", t / 100, t % 100, h / 100, h % 100);
+        }
+        else
+        {
+            logPrintf("Sensor: DHT22 read failed (%s)", dht22StatusName(status));
+        }
 
         // BLOCKED: until the next period starts, SensorTask is off the CPU and
         // lower-priority tasks (Task A, Task B, Idle) run instead. When the
@@ -192,6 +204,7 @@ int main(void)
     SystemCoreClockUpdate();
 
     MX_USART1_UART_Init();
+    dht22Init();
 
     const char *msg1 = "BCA182 FreeRTOS Multisensor\r\n";
     const char *msg2 = "System starting...\r\n";

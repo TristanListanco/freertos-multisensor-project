@@ -7,6 +7,16 @@
       "type": "board-stm32-bluepill",
       "id": "stm",
       "attrs": {}
+    },
+    {
+      "type": "wokwi-dht22",
+      "id": "dht1",
+      "top": -115.2,
+      "left": 96,
+      "attrs": {
+        "temperature": "25.4",
+        "humidity": "61.2"
+      }
     }
   ],
   "connections": [
@@ -19,6 +29,24 @@
       "stm:A10",
       "$serialMonitor:TX",
       ""
+    ],
+    [
+      "dht1:VCC",
+      "stm:3V3.1",
+      "red",
+      []
+    ],
+    [
+      "dht1:GND",
+      "stm:GND.1",
+      "black",
+      []
+    ],
+    [
+      "dht1:SDA",
+      "stm:B12",
+      "green",
+      []
     ]
   ]
 }
