@@ -103,65 +103,72 @@ void TaskB(void *pvParameters)
     }
 }
 
+// Reads every sensor once and logs the results.
+static void readSensors(void)
+{
+    int16_t temperature;
+    uint16_t humidity;
+    Dht22Status status = dht22Read(&temperature, &humidity);
+    if (status == DHT22_OK)
+    {
+        // The DHT22 reports tenths; scale to hundredths to print two decimals.
+        int t = (temperature < 0 ? -temperature : temperature) * 10;
+        int h = humidity * 10;
+        logPrintf("Sensor: Temperature: %s%d.%02d C, Humidity: %d.%02d %%",
+                  temperature < 0 ? "-" : "", t / 100, t % 100, h / 100, h % 100);
+    }
+    else
+    {
+        logPrintf("Sensor: DHT22 read failed (%s)", dht22StatusName(status));
+    }
+
+    uint16_t light;
+    if (ldrRead(&light) == HAL_OK)
+    {
+        logPrintf("Sensor: Light: %d %% (ADC %d of %d)", ldrLightPercent(light), light,
+                  LDR_ADC_MAX);
+    }
+    else
+    {
+        logPrintf("Sensor: LDR read failed");
+    }
+}
+
 // --- Sensor Task Definition ---
+// vTaskDelayUntil counts each period from the previous wake time rather than
+// from when readSensors finishes, so the reads start exactly
+// SENSOR_TASK_PERIOD_MS apart however long they take.
 void SensorTask(void *pvParameters)
 {
-    // The scheduler starts at tick 0. StateMonitorTask uses the same reference,
-    // so both wake on the same tick every SENSOR_TASK_PERIOD_MS.
-    TickType_t lastWake = 0;
+    TickType_t lastWakeTime = xTaskGetTickCount();
 
     for (;;)
     {
         // RUNNING: this code only executes while SensorTask holds the CPU
         // (except for the 2-3 ms dht22Read blocks during its start signal).
-        int16_t temperature;
-        uint16_t humidity;
-        Dht22Status status = dht22Read(&temperature, &humidity);
-        if (status == DHT22_OK)
-        {
-            // The DHT22 reports tenths; scale to hundredths to print two decimals.
-            int t = (temperature < 0 ? -temperature : temperature) * 10;
-            int h = humidity * 10;
-            logPrintf("Sensor: Temperature: %s%d.%02d C, Humidity: %d.%02d %%",
-                      temperature < 0 ? "-" : "", t / 100, t % 100, h / 100, h % 100);
-        }
-        else
-        {
-            logPrintf("Sensor: DHT22 read failed (%s)", dht22StatusName(status));
-        }
-
-        uint16_t light;
-        if (ldrRead(&light) == HAL_OK)
-        {
-            logPrintf("Sensor: Light: %d %% (ADC %d of %d)", ldrLightPercent(light), light,
-                      LDR_ADC_MAX);
-        }
-        else
-        {
-            logPrintf("Sensor: LDR read failed");
-        }
+        readSensors();
 
         // BLOCKED: until the next period starts, SensorTask is off the CPU and
         // lower-priority tasks (Task A, Task B, Idle) run instead. When the
         // period is up, the tick interrupt makes it READY, and it resumes once
         // no higher-priority task is ready.
-        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(SENSOR_TASK_PERIOD_MS));
+        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(SENSOR_TASK_PERIOD_MS));
     }
 }
 
 // --- State Monitor Task Definition ---
 // Samples SensorTask's state. It can never see Running: with one CPU, while
-// this task runs, SensorTask does not. Every 4th sample falls on the tick
-// SensorTask wakes; this task has the higher priority so it runs first and sees
-// SensorTask Ready (unblocked, waiting for the CPU).
+// this task runs, SensorTask does not. It normally sees Blocked: SensorTask's
+// period starts a few ticks after this task's, once this task's first log line
+// has been sent, so SensorTask never wakes on the same tick as a sample.
 void StateMonitorTask(void *pvParameters)
 {
-    TickType_t lastWake = 0;
+    TickType_t lastWakeTime = xTaskGetTickCount();
 
     for (;;)
     {
         logPrintf("Monitor: SensorTask is %s", stateName(eTaskGetState(sensorTaskHandle)));
-        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(MONITOR_TASK_PERIOD_MS));
+        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(MONITOR_TASK_PERIOD_MS));
     }
 }
 
