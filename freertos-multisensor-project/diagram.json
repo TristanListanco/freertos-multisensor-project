@@ -17,6 +17,13 @@
         "temperature": "25.4",
         "humidity": "61.2"
       }
+    },
+    {
+      "type": "wokwi-photoresistor-sensor",
+      "id": "ldr1",
+      "top": -115.2,
+      "left": -144,
+      "attrs": {}
     }
   ],
   "connections": [
@@ -46,6 +53,24 @@
       "dht1:SDA",
       "stm:B12",
       "green",
+      []
+    ],
+    [
+      "ldr1:VCC",
+      "stm:3V3.2",
+      "red",
+      []
+    ],
+    [
+      "ldr1:GND",
+      "stm:GND.2",
+      "black",
+      []
+    ],
+    [
+      "ldr1:AO",
+      "stm:A0",
+      "orange",
       []
     ]
   ]

@@ -3,6 +3,7 @@
 #include "task.h"     // Task creation and blocking-delay functions.
 #include "semphr.h"   // Mutex that lets tasks share the UART.
 #include "dht22.h"
+#include "ldr.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -129,6 +130,17 @@ void SensorTask(void *pvParameters)
             logPrintf("Sensor: DHT22 read failed (%s)", dht22StatusName(status));
         }
 
+        uint16_t light;
+        if (ldrRead(&light) == HAL_OK)
+        {
+            logPrintf("Sensor: Light: %d %% (ADC %d of %d)", ldrLightPercent(light), light,
+                      LDR_ADC_MAX);
+        }
+        else
+        {
+            logPrintf("Sensor: LDR read failed");
+        }
+
         // BLOCKED: until the next period starts, SensorTask is off the CPU and
         // lower-priority tasks (Task A, Task B, Idle) run instead. When the
         // period is up, the tick interrupt makes it READY, and it resumes once
@@ -205,12 +217,18 @@ int main(void)
 
     MX_USART1_UART_Init();
     dht22Init();
+    HAL_StatusTypeDef ldrStatus = ldrInit();
 
     const char *msg1 = "BCA182 FreeRTOS Multisensor\r\n";
     const char *msg2 = "System starting...\r\n";
 
     HAL_UART_Transmit(&huart1, (uint8_t *)msg1, strlen(msg1), 100);
     HAL_UART_Transmit(&huart1, (uint8_t *)msg2, strlen(msg2), 100);
+    if (ldrStatus != HAL_OK)
+    {
+        const char *msg = "Warning: LDR ADC setup or calibration failed\r\n";
+        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+    }
 
     uartMutex = xSemaphoreCreateMutex();
 
