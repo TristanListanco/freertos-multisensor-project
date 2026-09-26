@@ -27,6 +27,7 @@ extern uint32_t SystemCoreClock; // Automatically provided by STM32Cube
 #define INCLUDE_vTaskDelayUntil 1
 #define INCLUDE_vTaskDelay 1
 #define INCLUDE_xTaskGetSchedulerState 1
+#define INCLUDE_eTaskGetState 1
 
 #ifdef __NVIC_PRIO_BITS
 #define configPRIO_BITS __NVIC_PRIO_BITS

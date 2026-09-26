@@ -1,9 +1,20 @@
 #include "stm32f1xx_hal.h"
 #include "FreeRTOS.h" // FreeRTOS definitions and time conversion macros.
 #include "task.h"     // Task creation and blocking-delay functions.
+#include "semphr.h"   // Mutex that lets tasks share the UART.
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
+// Scheduling parameters observed in lab step 18.
+#define SENSOR_TASK_PRIORITY 2
+#define SENSOR_TASK_PERIOD_MS 2000
+#define MONITOR_TASK_PRIORITY 3
+#define MONITOR_TASK_PERIOD_MS 500
+
 UART_HandleTypeDef huart1;
+static SemaphoreHandle_t uartMutex;
+static TaskHandle_t sensorTaskHandle;
 
 void SystemClock_Config(void);
 static void MX_USART1_UART_Init(void);
@@ -22,13 +33,52 @@ extern "C" void SysTick_Handler(void)
     }
 }
 
+// Prints one line prefixed with the tick time. Several tasks share USART1; the
+// mutex stops a task that preempts another mid-line from getting HAL_BUSY and
+// losing its line.
+static void logPrintf(const char *fmt, ...)
+{
+    char line[80];
+    size_t len = snprintf(line, sizeof line, "[%6lu ms] ",
+                          (unsigned long)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line + len, sizeof line - len - 2, fmt, args); // leave room for "\r\n"
+    va_end(args);
+
+    len = strlen(line);
+    line[len++] = '\r';
+    line[len++] = '\n';
+
+    xSemaphoreTake(uartMutex, portMAX_DELAY);
+    HAL_UART_Transmit(&huart1, (uint8_t *)line, len, 100);
+    xSemaphoreGive(uartMutex);
+}
+
+static const char *stateName(eTaskState state)
+{
+    switch (state)
+    {
+    case eRunning:
+        return "Running";
+    case eReady:
+        return "Ready";
+    case eBlocked:
+        return "Blocked";
+    case eSuspended:
+        return "Suspended";
+    default:
+        return "Deleted";
+    }
+}
+
 // --- Task A Definition ---
 void TaskA(void *pvParameters)
 {
-    const char *msg = "Task A running\r\n";
     for (;;)
     {
-        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+        logPrintf("Task A running");
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -36,13 +86,52 @@ void TaskA(void *pvParameters)
 // --- Task B Definition ---
 void TaskB(void *pvParameters)
 {
-    const char *msg = "Task B running\r\n";
     // Offset slightly so Task A and Task B don't try to print at the exact same millisecond
     vTaskDelay(pdMS_TO_TICKS(500));
     for (;;)
     {
-        HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+        logPrintf("Task B running");
         vTaskDelay(pdMS_TO_TICKS(1500));
+    }
+}
+
+// --- Sensor Task Definition ---
+void SensorTask(void *pvParameters)
+{
+    // The scheduler starts at tick 0. StateMonitorTask uses the same reference,
+    // so both wake on the same tick every SENSOR_TASK_PERIOD_MS.
+    TickType_t lastWake = 0;
+    uint32_t reading = 0;
+
+    for (;;)
+    {
+        // RUNNING: this code only executes while SensorTask holds the CPU.
+        reading++; // placeholder until real sensors are wired up
+        logPrintf("SensorTask: %s, priority %lu, reading #%lu",
+                  stateName(eTaskGetState(sensorTaskHandle)),
+                  (unsigned long)uxTaskPriorityGet(NULL), (unsigned long)reading);
+
+        // BLOCKED: until the next period starts, SensorTask is off the CPU and
+        // lower-priority tasks (Task A, Task B, Idle) run instead. When the
+        // period is up, the tick interrupt makes it READY, and it resumes once
+        // no higher-priority task is ready.
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(SENSOR_TASK_PERIOD_MS));
+    }
+}
+
+// --- State Monitor Task Definition ---
+// Samples SensorTask's state. It can never see Running: with one CPU, while
+// this task runs, SensorTask does not. Every 4th sample falls on the tick
+// SensorTask wakes; this task has the higher priority so it runs first and sees
+// SensorTask Ready (unblocked, waiting for the CPU).
+void StateMonitorTask(void *pvParameters)
+{
+    TickType_t lastWake = 0;
+
+    for (;;)
+    {
+        logPrintf("Monitor: SensorTask is %s", stateName(eTaskGetState(sensorTaskHandle)));
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(MONITOR_TASK_PERIOD_MS));
     }
 }
 
@@ -62,11 +151,16 @@ int main(void)
     HAL_UART_Transmit(&huart1, (uint8_t *)msg1, strlen(msg1), 100);
     HAL_UART_Transmit(&huart1, (uint8_t *)msg2, strlen(msg2), 100);
 
-    // Create Tasks and catch potential memory errors
-    BaseType_t retA = xTaskCreate(TaskA, "TaskA", 128, NULL, 1, NULL);
-    BaseType_t retB = xTaskCreate(TaskB, "TaskB", 128, NULL, 1, NULL);
+    uartMutex = xSemaphoreCreateMutex();
 
-    if (retA != pdPASS || retB != pdPASS)
+    // Create Tasks and catch potential memory errors. 256-word stacks leave
+    // room for the formatting in logPrintf.
+    BaseType_t retA = xTaskCreate(TaskA, "TaskA", 256, NULL, 1, NULL);
+    BaseType_t retB = xTaskCreate(TaskB, "TaskB", 256, NULL, 1, NULL);
+    BaseType_t retS = xTaskCreate(SensorTask, "Sensor", 256, NULL, SENSOR_TASK_PRIORITY, &sensorTaskHandle);
+    BaseType_t retM = xTaskCreate(StateMonitorTask, "Monitor", 256, NULL, MONITOR_TASK_PRIORITY, NULL);
+
+    if (uartMutex == NULL || retA != pdPASS || retB != pdPASS || retS != pdPASS || retM != pdPASS)
     {
         HAL_UART_Transmit(&huart1, (uint8_t *)"Task creation failed\r\n", 22, 100);
         while (1)
