@@ -40,6 +40,13 @@
       "top": 96,
       "left": 326.4,
       "attrs": {}
+    },
+    {
+      "type": "wokwi-pir-motion-sensor",
+      "id": "pir1",
+      "top": 96,
+      "left": -144,
+      "attrs": {}
     }
   ],
   "connections": [
@@ -135,6 +142,24 @@
       "encoder1:DT",
       "stm:A2",
       "white",
+      []
+    ],
+    [
+      "pir1:VCC",
+      "stm:5V.1",
+      "red",
+      []
+    ],
+    [
+      "pir1:GND",
+      "stm:GND.1",
+      "black",
+      []
+    ],
+    [
+      "pir1:OUT",
+      "stm:A3",
+      "green",
       []
     ]
   ]

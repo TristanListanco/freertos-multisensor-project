@@ -1,6 +1,7 @@
 #ifndef SSD1306_H
 #define SSD1306_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "stm32f1xx_hal.h"
 
@@ -32,6 +33,10 @@ void ssd1306DrawText(int x, int y, const char *text, int scale);
 
 /* Sends the framebuffer to the panel. Takes about 25 ms at 400 kHz. */
 HAL_StatusTypeDef ssd1306Update(void);
+
+/* Turns the panel on or off (sleep mode). The panel keeps its contents while
+   off, and updates still work. */
+HAL_StatusTypeDef ssd1306SetDisplayOn(bool on);
 
 #ifdef __cplusplus
 }

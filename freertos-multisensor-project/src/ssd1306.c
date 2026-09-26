@@ -131,6 +131,12 @@ void ssd1306DrawText(int x, int y, const char *text, int scale)
     }
 }
 
+HAL_StatusTypeDef ssd1306SetDisplayOn(bool on)
+{
+    const uint8_t command = on ? 0xAF : 0xAE;
+    return sendCommands(&command, 1);
+}
+
 HAL_StatusTypeDef ssd1306Update(void)
 {
     /* Write the whole panel: columns 0-127, pages 0-7. */

@@ -3,10 +3,12 @@
 #include "task.h"     // Task creation and blocking-delay functions.
 #include "semphr.h"   // Mutex that lets tasks share the UART.
 #include "queue.h"    // Queues that carry readings from SensorTask to its consumers.
+#include "event_groups.h" // Broadcasts ACTIVE/INACTIVE to the tasks that pause.
 #include "dht22.h"
 #include "ldr.h"
 #include "ssd1306.h"
 #include "alarm_logic.h"
+#include "system_state.h"
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -35,8 +37,16 @@ struct SensorData
     float temperature;   // degrees C; NAN if the DHT22 read failed
     float humidity;      // % relative humidity; NAN if the DHT22 read failed
     int lightLevel;      // 0-100 %, relative, not lux (see ldr.c); -1 if the read failed
-    bool motionDetected; // always false: no motion sensor is wired yet
+    bool motionDetected; // PIR output high when the reading was taken
 };
+
+// Motion and system state (lab steps 31-34).
+#define MOTION_TASK_PRIORITY 3      // wakes the system; its work per poll is tiny
+#define MOTION_POLL_MS 100          // the PIR holds its output high for seconds, so 10 Hz is plenty
+#define INACTIVITY_TIMEOUT_MS 15000 // short, for laboratory testing
+#define PIR_PORT GPIOA
+#define PIR_PIN GPIO_PIN_3
+#define SYSTEM_ACTIVE_BIT (1u << 0) // set in systemEvents while the system is ACTIVE
 
 // Rotary encoder navigation (lab steps 28-29).
 #define INPUT_TASK_PRIORITY 3 // it only relays encoder steps, so running at once costs almost nothing
@@ -71,12 +81,18 @@ static QueueHandle_t encoderQueue;
 // The page InputTask selected. One slot, overwritten on every change, so
 // DisplayTask always gets the latest page and never a backlog of old ones.
 static QueueHandle_t modeQueue;
-// Lets DisplayTask block on displayQueue and modeQueue at the same time.
+// MotionTask publishes the system state two ways. systemEvents holds it as a
+// bit that SensorTask can block on and InputTask can check. systemStateQueue
+// (one slot, overwritten) wakes DisplayTask to turn the OLED off or on.
+static EventGroupHandle_t systemEvents;
+static QueueHandle_t systemStateQueue;
+// Lets DisplayTask block on displayQueue, modeQueue and systemStateQueue at once.
 static QueueSetHandle_t displayEvents;
 
 void SystemClock_Config(void);
 static void MX_USART1_UART_Init(void);
 static void MX_Encoder_Init(void);
+static void MX_PIR_Init(void);
 
 extern "C" void xPortSysTickHandler(void);
 
@@ -169,11 +185,23 @@ void TaskB(void *pvParameters)
     }
 }
 
+// The PIR module drives OUT high while it senses motion, and for its hold time
+// (a few seconds) after.
+static bool pirMotionDetected(void)
+{
+    return HAL_GPIO_ReadPin(PIR_PORT, PIR_PIN) == GPIO_PIN_SET;
+}
+
+static bool systemIsActive(void)
+{
+    return (xEventGroupGetBits(systemEvents) & SYSTEM_ACTIVE_BIT) != 0;
+}
+
 // Reads every sensor once. Failures are logged here, where the reason is known;
 // the reading carries only a "no value" marker.
 static SensorData readSensors(void)
 {
-    SensorData data = {NAN, NAN, -1, false};
+    SensorData data = {NAN, NAN, -1, pirMotionDetected()};
 
     int16_t temperature;
     uint16_t humidity;
@@ -222,6 +250,16 @@ void SensorTask(void *pvParameters)
 
     for (;;)
     {
+        // INACTIVE: acquisition pauses, so DisplayTask and AlarmTask get no
+        // readings either. Blocked here, not polling, until motion restores
+        // ACTIVE; then the period restarts instead of catching up on the
+        // periods it slept through.
+        if (!systemIsActive())
+        {
+            xEventGroupWaitBits(systemEvents, SYSTEM_ACTIVE_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+            lastWakeTime = xTaskGetTickCount();
+        }
+
         // RUNNING: this code only executes while SensorTask holds the CPU
         // (except for the 2-3 ms dht22Read blocks during its start signal).
         SensorData data = readSensors();
@@ -310,11 +348,13 @@ static HAL_StatusTypeDef showOnOled(DisplayMode mode, const SensorData &data)
 // First consumer, and the owner of the OLED: no other task initialises or draws
 // on it, so the display driver needs no mutex (lab step 26). It keeps the latest
 // reading and the current page, and redraws when either changes. Each reading
-// also goes to the serial port.
+// also goes to the serial port. While the system is INACTIVE the OLED is off
+// and nothing is drawn (lab step 34).
 void DisplayTask(void *pvParameters)
 {
     SensorData data = {NAN, NAN, -1, false};
     DisplayMode mode = DisplayMode::TEMPERATURE;
+    SystemState systemState = SystemState::ACTIVE;
     uint32_t received = 0;
 
     bool oledReady = ssd1306Init() == HAL_OK && showOnOled(mode, data) == HAL_OK;
@@ -342,12 +382,21 @@ void DisplayTask(void *pvParameters)
                       formatDecimal(humidity, sizeof humidity, data.humidity, 2), light,
                       data.motionDetected ? "yes" : "no");
         }
-        else
+        else if (ready == modeQueue)
         {
             xQueueReceive(modeQueue, &mode, 0);
         }
+        else
+        {
+            xQueueReceive(systemStateQueue, &systemState, 0);
+            if (oledReady &&
+                ssd1306SetDisplayOn(systemState == SystemState::ACTIVE) != HAL_OK)
+            {
+                logPrintf("Display: OLED on/off failed");
+            }
+        }
 
-        if (oledReady && showOnOled(mode, data) != HAL_OK)
+        if (oledReady && systemState == SystemState::ACTIVE && showOnOled(mode, data) != HAL_OK)
         {
             logPrintf("Display: OLED update failed");
         }
@@ -364,6 +413,8 @@ static DisplayMode stepMode(DisplayMode mode, int step)
 // --- Input Task Definition ---
 // Owns the page selection. Blocked until the encoder ISR queues a step, then
 // moves one page and hands the new page to DisplayTask, which owns the OLED.
+// The encoder is active only while the system is ACTIVE (lab step 33): with the
+// OLED off there is no page to change, and only the PIR wakes the system.
 void InputTask(void *pvParameters)
 {
     DisplayMode mode = DisplayMode::TEMPERATURE;
@@ -372,9 +423,66 @@ void InputTask(void *pvParameters)
     for (;;)
     {
         xQueueReceive(encoderQueue, &step, portMAX_DELAY);
+        if (!systemIsActive())
+        {
+            logPrintf("Input: ignored, system INACTIVE");
+            continue;
+        }
         mode = stepMode(mode, step);
         xQueueOverwrite(modeQueue, &mode);
         logPrintf("Input: %s, page %s", step > 0 ? "clockwise" : "counterclockwise", modeName(mode));
+    }
+}
+
+// Sets systemEvents' bit and tells DisplayTask, in that order, so SensorTask
+// and InputTask see the new state before the OLED changes.
+static void publishSystemState(SystemState state)
+{
+    if (state == SystemState::ACTIVE)
+    {
+        xEventGroupSetBits(systemEvents, SYSTEM_ACTIVE_BIT);
+    }
+    else
+    {
+        xEventGroupClearBits(systemEvents, SYSTEM_ACTIVE_BIT);
+    }
+    xQueueOverwrite(systemStateQueue, &state);
+}
+
+// --- Motion Task Definition ---
+// Owns the system state (lab steps 31-32). Polls the PIR every MOTION_POLL_MS
+// with vTaskDelayUntil and feeds nextSystemState in lib/system_state, which
+// decides the transitions and is unit tested on the host. It runs in both
+// states: motion detection stays operational while INACTIVE (lab step 34).
+void MotionTask(void *pvParameters)
+{
+    SystemState state = SystemState::ACTIVE;
+    TickType_t lastMotion = xTaskGetTickCount(); // start ACTIVE, with the full timeout
+    TickType_t lastWakeTime = lastMotion;
+
+    publishSystemState(state);
+    logPrintf("Motion: %s, timeout %d s", systemStateName(state), INACTIVITY_TIMEOUT_MS / 1000);
+
+    for (;;)
+    {
+        TickType_t now = xTaskGetTickCount();
+        bool motion = pirMotionDetected();
+        if (motion)
+        {
+            lastMotion = now;
+        }
+
+        SystemState next = nextSystemState(state, motion, (now - lastMotion) * portTICK_PERIOD_MS,
+                                           INACTIVITY_TIMEOUT_MS);
+        if (next != state)
+        {
+            state = next;
+            publishSystemState(state);
+            logPrintf("Motion: %s (%s)", systemStateName(state),
+                      motion ? "motion detected" : "inactivity timeout");
+        }
+
+        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(MOTION_POLL_MS));
     }
 }
 
@@ -493,13 +601,18 @@ int main(void)
     alarmQueue = xQueueCreate(SENSOR_QUEUE_LENGTH, sizeof(SensorData));
     encoderQueue = xQueueCreate(ENCODER_QUEUE_LENGTH, sizeof(int8_t));
     modeQueue = xQueueCreate(1, sizeof(DisplayMode));
-    displayEvents = xQueueCreateSet(SENSOR_QUEUE_LENGTH + 1);
-    if (displayEvents != NULL && displayQueue != NULL && modeQueue != NULL)
+    systemEvents = xEventGroupCreate();
+    systemStateQueue = xQueueCreate(1, sizeof(SystemState));
+    displayEvents = xQueueCreateSet(SENSOR_QUEUE_LENGTH + 1 + 1);
+    if (displayEvents != NULL && displayQueue != NULL && modeQueue != NULL &&
+        systemStateQueue != NULL)
     {
         xQueueAddToSet(displayQueue, displayEvents);
         xQueueAddToSet(modeQueue, displayEvents);
+        xQueueAddToSet(systemStateQueue, displayEvents);
     }
     MX_Encoder_Init(); // after encoderQueue exists: its interrupt sends to it
+    MX_PIR_Init();
 
     // Create Tasks and catch potential memory errors. 256-word stacks leave
     // room for the formatting in logPrintf.
@@ -511,11 +624,13 @@ int main(void)
     BaseType_t retD = xTaskCreate(DisplayTask, "Display", 256, NULL, DISPLAY_TASK_PRIORITY, NULL);
     BaseType_t retL = xTaskCreate(AlarmTask, "Alarm", 256, NULL, ALARM_TASK_PRIORITY, NULL);
     BaseType_t retI = xTaskCreate(InputTask, "Input", 256, NULL, INPUT_TASK_PRIORITY, NULL);
+    BaseType_t retO = xTaskCreate(MotionTask, "Motion", 256, NULL, MOTION_TASK_PRIORITY, NULL);
 
     if (uartMutex == NULL || displayQueue == NULL || alarmQueue == NULL || encoderQueue == NULL ||
-        modeQueue == NULL || displayEvents == NULL || retA != pdPASS || retB != pdPASS ||
-        retS != pdPASS || retM != pdPASS || retP != pdPASS || retD != pdPASS || retL != pdPASS ||
-        retI != pdPASS)
+        modeQueue == NULL || systemEvents == NULL || systemStateQueue == NULL ||
+        displayEvents == NULL || retA != pdPASS || retB != pdPASS || retS != pdPASS ||
+        retM != pdPASS || retP != pdPASS || retD != pdPASS || retL != pdPASS || retI != pdPASS ||
+        retO != pdPASS)
     {
         HAL_UART_Transmit(&huart1, (uint8_t *)"Task creation failed\r\n", 22, 100);
         while (1)
@@ -584,6 +699,19 @@ static void MX_Encoder_Init(void)
     // Lowest priority, the same as the kernel's own SysTick and PendSV.
     HAL_NVIC_SetPriority(EXTI1_IRQn, 15, 0);
     HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+}
+
+// --- PIR Motion Sensor Pin ---
+static void MX_PIR_Init(void)
+{
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    // Pull-down: a disconnected sensor reads as "no motion".
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = PIR_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(PIR_PORT, &GPIO_InitStruct);
 }
 
 // --- USART1 Hardware Pins ---
