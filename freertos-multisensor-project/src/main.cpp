@@ -66,7 +66,7 @@ enum class DisplayMode
 constexpr int DISPLAY_MODE_COUNT = static_cast<int>(DisplayMode::MOTION) + 1;
 
 UART_HandleTypeDef huart1;
-static SemaphoreHandle_t uartMutex;
+static SemaphoreHandle_t serialMutex; // guards USART1; see logPrintf
 static TaskHandle_t sensorTaskHandle;
 
 // Each consumer gets its own queue. A FreeRTOS queue hands every item to exactly
@@ -137,9 +137,17 @@ extern "C" void SysTick_Handler(void)
     }
 }
 
-// Prints one line prefixed with the tick time. Several tasks share USART1; the
-// mutex stops a task that preempts another mid-line from getting HAL_BUSY and
-// losing its line.
+// Prints one line prefixed with the tick time. USART1 is shared by every task
+// that logs, and all of them print through here (lab step 36).
+//
+// serialMutex makes each line one uninterrupted transmission. Without it, a
+// task that preempted another mid-line would find the UART busy and its line
+// would be lost or mixed into the other one. It is a mutex rather than a binary
+// semaphore for priority inheritance: while a high-priority task (AlarmTask)
+// waits for a line from a low-priority one (DisplayTask), the holder runs at
+// the waiter's priority, so mid-priority tasks (ProcessingTask) can't stretch
+// the wait. The line is formatted before taking the mutex, so the mutex is held
+// only while the bytes go out (up to about 7 ms for a full line at 115200 baud).
 static void logPrintf(const char *fmt, ...)
 {
     char line[80];
@@ -155,9 +163,9 @@ static void logPrintf(const char *fmt, ...)
     line[len++] = '\r';
     line[len++] = '\n';
 
-    xSemaphoreTake(uartMutex, portMAX_DELAY);
+    xSemaphoreTake(serialMutex, portMAX_DELAY);
     HAL_UART_Transmit(&huart1, (uint8_t *)line, len, 100);
-    xSemaphoreGive(uartMutex);
+    xSemaphoreGive(serialMutex);
 }
 
 static const char *modeName(DisplayMode mode)
@@ -634,6 +642,8 @@ int main(void)
     dht22Init();
     HAL_StatusTypeDef ldrStatus = ldrInit();
 
+    // Direct writes are safe here without serialMutex: the scheduler hasn't
+    // started, so nothing else can be using the UART.
     const char *msg1 = "BCA182 FreeRTOS Multisensor\r\n";
     const char *msg2 = "System starting...\r\n";
 
@@ -645,7 +655,7 @@ int main(void)
         HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
     }
 
-    uartMutex = xSemaphoreCreateMutex();
+    serialMutex = xSemaphoreCreateMutex();
     displayQueue = xQueueCreate(SENSOR_QUEUE_LENGTH, sizeof(SensorData));
     alarmQueue = xQueueCreate(SENSOR_QUEUE_LENGTH, sizeof(SensorData));
     encoderQueue = xQueueCreate(ENCODER_QUEUE_LENGTH, sizeof(int8_t));
@@ -675,7 +685,7 @@ int main(void)
     BaseType_t retI = xTaskCreate(InputTask, "Input", 256, NULL, INPUT_TASK_PRIORITY, NULL);
     BaseType_t retO = xTaskCreate(MotionTask, "Motion", 256, NULL, MOTION_TASK_PRIORITY, NULL);
 
-    if (uartMutex == NULL || displayQueue == NULL || alarmQueue == NULL || encoderQueue == NULL ||
+    if (serialMutex == NULL || displayQueue == NULL || alarmQueue == NULL || encoderQueue == NULL ||
         modeQueue == NULL || systemEvents == NULL || systemStateQueue == NULL ||
         displayEvents == NULL || retA != pdPASS || retB != pdPASS || retS != pdPASS ||
         retM != pdPASS || retP != pdPASS || retD != pdPASS || retL != pdPASS || retI != pdPASS ||
