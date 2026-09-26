@@ -5,6 +5,7 @@
 #include "queue.h"    // Queues that carry readings from SensorTask to its consumers.
 #include "dht22.h"
 #include "ldr.h"
+#include "ssd1306.h"
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -208,26 +209,50 @@ void StateMonitorTask(void *pvParameters)
     }
 }
 
-// Formats a value with two decimals, or "--" for NAN. newlib-nano's printf has
-// no %f, so this prints the rounded hundredths as integers.
-static const char *formatHundredths(char *buf, size_t size, float value)
+// Formats a value with 1 or 2 decimals, or "--" for NAN. newlib-nano's printf
+// has no %f, so this prints the rounded value's digits as integers.
+static const char *formatDecimal(char *buf, size_t size, float value, int decimals)
 {
     if (isnan(value))
     {
         return "--";
     }
-    long hundredths = lroundf(value * 100.0f);
-    long magnitude = hundredths < 0 ? -hundredths : hundredths;
-    snprintf(buf, size, "%s%ld.%02ld", hundredths < 0 ? "-" : "", magnitude / 100, magnitude % 100);
+    long unit = decimals == 1 ? 10 : 100;
+    long scaled = lroundf(value * unit);
+    long magnitude = scaled < 0 ? -scaled : scaled;
+    snprintf(buf, size, "%s%ld.%0*ld", scaled < 0 ? "-" : "", magnitude / unit, decimals,
+             magnitude % unit);
     return buf;
 }
 
+// Draws the room monitor screen (lab step 27). One decimal place, the DHT22's
+// resolution.
+static HAL_StatusTypeDef showOnOled(const SensorData &data)
+{
+    char number[16], value[20];
+    snprintf(value, sizeof value, "%s C", formatDecimal(number, sizeof number, data.temperature, 1));
+
+    ssd1306Clear();
+    ssd1306DrawText(0, 0, "ROOM MONITOR", 1);
+    ssd1306DrawText(0, 24, "Temperature", 1);
+    ssd1306DrawText(0, 36, value, 2);
+    return ssd1306Update();
+}
+
 // --- Display Task Definition ---
-// First consumer. Prints each reading to the serial port until the OLED is added.
+// First consumer, and the owner of the OLED: no other task initialises or draws
+// on it, so the display driver needs no mutex (lab step 26). Each reading also
+// goes to the serial port.
 void DisplayTask(void *pvParameters)
 {
-    SensorData data;
+    SensorData data = {NAN, NAN, -1, false};
     uint32_t received = 0;
+
+    bool oledReady = ssd1306Init() == HAL_OK && showOnOled(data) == HAL_OK;
+    if (!oledReady)
+    {
+        logPrintf("Display: OLED not responding, serial output only");
+    }
 
     for (;;)
     {
@@ -241,9 +266,14 @@ void DisplayTask(void *pvParameters)
             snprintf(light, sizeof light, "%d", data.lightLevel);
         }
         logPrintf("Display #%lu: %s C, %s %%RH, light %s %%, motion %s", (unsigned long)received,
-                  formatHundredths(temperature, sizeof temperature, data.temperature),
-                  formatHundredths(humidity, sizeof humidity, data.humidity), light,
+                  formatDecimal(temperature, sizeof temperature, data.temperature, 2),
+                  formatDecimal(humidity, sizeof humidity, data.humidity, 2), light,
                   data.motionDetected ? "yes" : "no");
+
+        if (oledReady && showOnOled(data) != HAL_OK)
+        {
+            logPrintf("Display: OLED update failed");
+        }
     }
 }
 
