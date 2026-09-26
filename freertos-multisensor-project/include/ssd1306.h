@@ -31,12 +31,18 @@ void ssd1306Clear(void);
    anything off-screen is clipped. */
 void ssd1306DrawText(int x, int y, const char *text, int scale);
 
-/* Sends the framebuffer to the panel. Takes about 25 ms at 400 kHz. */
+/* Sends the framebuffer to the panel. Takes about 25 ms at 400 kHz on
+   hardware, about 160 ms in Wokwi. */
 HAL_StatusTypeDef ssd1306Update(void);
 
 /* Turns the panel on or off (sleep mode). The panel keeps its contents while
    off, and updates still work. */
 HAL_StatusTypeDef ssd1306SetDisplayOn(bool on);
+
+/* The HAL I2C error bits from the last transfer, for diagnosing a failure:
+   0x04 no acknowledge (nothing answered at 0x3C), 0x20 timeout (e.g. the bus
+   stayed busy), 0x01 bus error, 0x02 arbitration lost. */
+uint32_t ssd1306LastError(void);
 
 #ifdef __cplusplus
 }

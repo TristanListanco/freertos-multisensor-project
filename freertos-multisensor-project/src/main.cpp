@@ -11,7 +11,7 @@
 //   motion        MotionTask (PIR) and the ACTIVE/INACTIVE system state
 //   rtos_objects  queues, event group and mutex shared between tasks
 //   log           serial output shared by every task
-//   demo_tasks    tasks from the earlier lab exercises (steps 17-19)
+//   demo_tasks    ProcessingTask, from the step 19 exercise
 //
 // Pure decision logic sits in lib/ rather than src/ so it also builds on the
 // host for `pio test -e native` (lab step 42): lib/alarm_logic (temperature
@@ -47,29 +47,24 @@
 //                 outrank DisplayTask, so EVENT_ALARM is updated before the
 //                 reading is drawn.
 // 1  DisplayTask  A human reads the screen, so tens of ms of delay go unnoticed.
-//                 Each OLED update busy-waits about 25 ms on I2C; at the bottom
-//                 that never holds up the tasks above.
+//                 Each OLED update busy-waits on I2C (about 25 ms on hardware,
+//                 160 ms in Wokwi); at the bottom that never holds up the tasks
+//                 above.
 //
-// Earlier lab exercises, kept for their demonstrations:
-// 3  StateMonitorTask  (step 18) samples SensorTask's state every 500 ms; above
-//                      it so SensorTask never delays a sample.
+// Earlier lab exercise, kept for its demonstration:
 // 2  ProcessingTask    (step 19) continuous work beside SensorTask, blocking
 //                      after each batch so the tasks below still run.
-// 1  TaskA, TaskB      (step 17) heartbeat prints; nothing depends on them.
 #define MOTION_TASK_PRIORITY 3
 #define INPUT_TASK_PRIORITY 3
 #define SENSOR_TASK_PRIORITY 2
 #define ALARM_TASK_PRIORITY 2
 #define DISPLAY_TASK_PRIORITY 1
-#define MONITOR_TASK_PRIORITY 3
 #define PROCESSING_TASK_PRIORITY 2
-#define TASK_A_PRIORITY 1
-#define TASK_B_PRIORITY 1
 
 // 256 words (1 KB) per task leaves room for the formatting in logPrintf.
 #define TASK_STACK_WORDS 256
 
-void SystemClock_Config(void);
+HAL_StatusTypeDef SystemClock_Config(void);
 
 extern "C" void xPortSysTickHandler(void);
 
@@ -105,7 +100,7 @@ int main(void)
 {
     // 1. Hardware initialisation.
     HAL_Init();
-    SystemClock_Config();
+    HAL_StatusTypeDef clockStatus = SystemClock_Config();
     SystemCoreClockUpdate(); // FreeRTOS derives its tick rate from SystemCoreClock
     logInit();
     HAL_StatusTypeDef sensorStatus = sensorsInit();
@@ -115,6 +110,10 @@ int main(void)
     // started, so nothing else can be using the UART.
     logWriteDirect("BCA182 FreeRTOS Multisensor\r\n");
     logWriteDirect("System starting...\r\n");
+    if (clockStatus != HAL_OK)
+    {
+        logWriteDirect("Warning: clock configuration failed\r\n");
+    }
     if (sensorStatus != HAL_OK)
     {
         logWriteDirect("Warning: LDR ADC setup or calibration failed\r\n");
@@ -129,10 +128,7 @@ int main(void)
 
     // 3. Task creation.
     bool tasksCreated =
-        createTask(TaskA, "TaskA", TASK_A_PRIORITY) &&
-        createTask(TaskB, "TaskB", TASK_B_PRIORITY) &&
-        createTask(SensorTask, "Sensor", SENSOR_TASK_PRIORITY, &sensorTaskHandle) &&
-        createTask(StateMonitorTask, "Monitor", MONITOR_TASK_PRIORITY) &&
+        createTask(SensorTask, "Sensor", SENSOR_TASK_PRIORITY) &&
         createTask(ProcessingTask, "Process", PROCESSING_TASK_PRIORITY) &&
         createTask(DisplayTask, "Display", DISPLAY_TASK_PRIORITY) &&
         createTask(AlarmTask, "Alarm", ALARM_TASK_PRIORITY) &&
@@ -149,22 +145,22 @@ int main(void)
     halt("Scheduler failed to start!\r\n");
 }
 
-// --- Minimal System Clock Configuration defaulting to HSI ---
-void SystemClock_Config(void)
+// --- System Clock Configuration ---
+// Everything runs from the 8 MHz internal oscillator (HSI) with no dividers:
+// SYSCLK = HCLK = PCLK1 = PCLK2 = 8 MHz.
+//
+// The chip already runs from HSI after reset, so only the bus dividers are set
+// and SYSCLK is left alone. Selecting HSI again fails in Wokwi: its RCC model
+// never reports HSI as ready, so HAL_RCC_ClockConfig returns HAL_ERROR after it
+// has already put both APB buses on their interim /16 setting. That left PCLK1
+// at 500 kHz, below the I2C peripheral's 4 MHz minimum for 400 kHz, and the
+// OLED could not start.
+HAL_StatusTypeDef SystemClock_Config(void)
 {
-    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
     RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
-
-    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
-    HAL_RCC_OscConfig(&RCC_OscInitStruct);
-
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
     RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
     RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0);
+    return HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0);
 }

@@ -14,9 +14,9 @@
 #define SSD1306_CONTROL_DATA 0x40       /* control byte: the rest are pixel data */
 
 /* The timeout covers a whole transfer, including time other tasks spend
-   preempting DisplayTask, so it is set well above the 25 ms a full update
-   takes. */
-#define SSD1306_I2C_TIMEOUT_MS 250
+   preempting DisplayTask, so it is set well above what a full update takes:
+   about 25 ms on hardware, about 160 ms in Wokwi, whose I2C is slower. */
+#define SSD1306_I2C_TIMEOUT_MS 1000
 
 static I2C_HandleTypeDef hi2c1;
 static uint8_t framebuffer[SSD1306_WIDTH * SSD1306_HEIGHT / 8];
@@ -129,6 +129,11 @@ void ssd1306DrawText(int x, int y, const char *text, int scale)
         drawChar(x, y, *text, scale);
         x += SSD1306_CHAR_WIDTH * scale;
     }
+}
+
+uint32_t ssd1306LastError(void)
+{
+    return HAL_I2C_GetError(&hi2c1);
 }
 
 HAL_StatusTypeDef ssd1306SetDisplayOn(bool on)

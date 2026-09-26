@@ -11,7 +11,6 @@ QueueHandle_t modeQueue;
 EventGroupHandle_t systemEvents;
 QueueHandle_t systemStateQueue;
 QueueSetHandle_t displayEvents;
-TaskHandle_t sensorTaskHandle;
 
 bool createRtosObjects(void)
 {

@@ -60,10 +60,16 @@ void DisplayTask(void *pvParameters)
     SystemState systemState = SystemState::ACTIVE;
     uint32_t received = 0;
 
-    bool oledReady = ssd1306Init() == HAL_OK && showOnOled(mode, data) == HAL_OK;
+    HAL_StatusTypeDef status = ssd1306Init();
+    if (status == HAL_OK)
+    {
+        status = showOnOled(mode, data);
+    }
+    bool oledReady = status == HAL_OK;
     if (!oledReady)
     {
-        logPrintf("Display: OLED not responding, serial output only");
+        logPrintf("Display: OLED init failed (HAL %d, I2C error 0x%02lx)", status,
+                  (unsigned long)ssd1306LastError());
     }
 
     for (;;)
@@ -96,13 +102,15 @@ void DisplayTask(void *pvParameters)
             if (oledReady &&
                 ssd1306SetDisplayOn(systemState == SystemState::ACTIVE) != HAL_OK)
             {
-                logPrintf("Display: OLED on/off failed");
+                logPrintf("Display: OLED on/off failed (I2C error 0x%02lx)",
+                          (unsigned long)ssd1306LastError());
             }
         }
 
         if (oledReady && systemState == SystemState::ACTIVE && showOnOled(mode, data) != HAL_OK)
         {
-            logPrintf("Display: OLED update failed");
+            logPrintf("Display: OLED update failed (I2C error 0x%02lx)",
+                      (unsigned long)ssd1306LastError());
         }
     }
 }

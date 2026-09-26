@@ -84,7 +84,7 @@ void SensorTask(void *pvParameters)
         sendReading(displayQueue, "display", data);
 
         // BLOCKED: until the next period starts, SensorTask is off the CPU and
-        // lower-priority tasks (Task A, Task B, Idle) run instead. When the
+        // lower-priority tasks (DisplayTask, Idle) run instead. When the
         // period is up, the tick interrupt makes it READY, and it resumes once
         // no higher-priority task is ready.
         vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(SENSOR_TASK_PERIOD_MS));

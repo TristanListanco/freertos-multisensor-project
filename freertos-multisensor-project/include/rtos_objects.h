@@ -68,11 +68,7 @@ extern QueueHandle_t systemStateQueue;
 // Lets DisplayTask block on displayQueue, modeQueue and systemStateQueue at once.
 extern QueueSetHandle_t displayEvents;
 
-// Set by xTaskCreate in main(); StateMonitorTask samples this task's state.
-extern TaskHandle_t sensorTaskHandle;
-
-// Creates every object above except the task handle. Returns false if any
-// allocation failed.
+// Creates every object above. Returns false if any allocation failed.
 bool createRtosObjects(void);
 
 #endif // RTOS_OBJECTS_H
