@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 // ACTIVE/INACTIVE state machine driven by the PIR (lab step 32). Pure logic,
-// unit tested on the host (test/test_system_state, `pio test -e native`).
+// unit tested on the host (test/test_system_state, `pio test`).
 //
 //   ACTIVE   --(no motion for timeoutMs)--> INACTIVE
 //   INACTIVE --(motion detected)----------> ACTIVE

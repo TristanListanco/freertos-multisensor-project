@@ -1,26 +1,27 @@
 // BCA182 FreeRTOS multisensor room monitor.
 //
-// main() only brings the system up (lab step 41): hardware initialisation,
-// FreeRTOS object creation, task creation, then the scheduler. The application
-// lives in the modules (lab step 40):
+// This file only brings the system up (lab step 41): app_main() does hardware
+// initialisation, FreeRTOS object creation, task creation, then starts the
+// scheduler. The application lives in the modules (lab step 40):
 //
 //   sensors       SensorData and SensorTask (DHT22, LDR)
-//   display       DisplayMode and DisplayTask (owns the OLED)
+//   display       DisplayTask (owns the OLED)
 //   input         InputTask and the rotary encoder interrupt
-//   alarm         AlarmTask
+//   alarm         AlarmTask (owns the buzzer)
 //   motion        MotionTask (PIR) and the ACTIVE/INACTIVE system state
-//   rtos_objects  queues, event group and mutex shared between tasks
+//   rtos_objects  queues, queue sets, event group and mutex shared between tasks
 //   log           serial output shared by every task
 //   demo_tasks    ProcessingTask, from the step 19 exercise
 //
 // Pure decision logic sits in lib/ rather than src/ so it also builds on the
-// host for `pio test -e native` (lab step 42): lib/alarm_logic (temperature
-// alarm), lib/display_navigation (encoder page changes) and lib/system_state
-// (the ACTIVE/INACTIVE state machine). Device drivers are dht22, ldr and
-// ssd1306.
+// host for `pio test` (lab step 42): lib/alarm_logic (temperature alarm and
+// buzzer rule), lib/display_navigation (DisplayMode and page changes) and
+// lib/system_state (the ACTIVE/INACTIVE state machine). Device drivers are
+// dht22, ldr, ssd1306 and buzzer.
 
 #include "stm32f1xx_hal.h"
 #include "alarm.h"
+#include "buzzer.h"
 #include "demo_tasks.h"
 #include "display.h"
 #include "input.h"
@@ -96,14 +97,16 @@ static bool createTask(TaskFunction_t task, const char *name, UBaseType_t priori
     return xTaskCreate(task, name, TASK_STACK_WORDS, NULL, priority, handle) == pdPASS;
 }
 
-int main(void)
+// The application entry point (lab section 10). It never returns: it ends by
+// handing the CPU to the FreeRTOS scheduler.
+[[noreturn]] static void app_main(void)
 {
     // 1. Hardware initialisation.
-    HAL_Init();
     HAL_StatusTypeDef clockStatus = SystemClock_Config();
     SystemCoreClockUpdate(); // FreeRTOS derives its tick rate from SystemCoreClock
     logInit();
     HAL_StatusTypeDef sensorStatus = sensorsInit();
+    HAL_StatusTypeDef buzzerStatus = buzzerInit(); // after the clock: its tone is set from PCLK1
     motionInit();
 
     // Direct writes are safe here without serialMutex: the scheduler hasn't
@@ -117,6 +120,10 @@ int main(void)
     if (sensorStatus != HAL_OK)
     {
         logWriteDirect("Warning: LDR ADC setup or calibration failed\r\n");
+    }
+    if (buzzerStatus != HAL_OK)
+    {
+        logWriteDirect("Warning: buzzer timer setup failed\r\n");
     }
 
     // 2. FreeRTOS object creation.
@@ -143,6 +150,16 @@ int main(void)
     // can't allocate the Idle task.
     vTaskStartScheduler();
     halt("Scheduler failed to start!\r\n");
+}
+
+// The C entry point: the startup code calls main() after reset. The lab
+// handout names app_main() as the application entry point (that is ESP-IDF's
+// convention, where the framework calls it); on STM32Cube nothing calls
+// app_main() for us, so main() resets the HAL and hands over to it.
+int main(void)
+{
+    HAL_Init();
+    app_main();
 }
 
 // --- System Clock Configuration ---

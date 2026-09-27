@@ -64,6 +64,8 @@ extern "C" void HAL_GPIO_EXTI_Callback(uint16_t pin)
         int8_t step = HAL_GPIO_ReadPin(ENCODER_PORT, ENCODER_DT_PIN) == GPIO_PIN_SET ? 1 : -1;
         BaseType_t higherPriorityTaskWoken = pdFALSE;
         xQueueSendFromISR(encoderQueue, &step, &higherPriorityTaskWoken); // dropped if the queue is full
+        // The cast is inside the FreeRTOS port's macro, not in this code.
+        // cppcheck-suppress cstyleCast
         portYIELD_FROM_ISR(higherPriorityTaskWoken);
     }
 }

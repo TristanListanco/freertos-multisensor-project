@@ -22,6 +22,9 @@ void logInit(void)
 }
 
 // --- USART1 Hardware Pins ---
+// Overrides HAL's weak HAL_UART_MspInit, so the signature must match HAL's
+// exactly, including the non-const pointer.
+// cppcheck-suppress constParameterPointer
 extern "C" void HAL_UART_MspInit(UART_HandleTypeDef *uartHandle)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -46,7 +49,7 @@ extern "C" void HAL_UART_MspInit(UART_HandleTypeDef *uartHandle)
 
 void logWriteDirect(const char *text)
 {
-    HAL_UART_Transmit(&huart1, (uint8_t *)text, strlen(text), 100);
+    HAL_UART_Transmit(&huart1, reinterpret_cast<const uint8_t *>(text), strlen(text), 100);
 }
 
 // serialMutex makes each line one uninterrupted transmission. Without it, a
@@ -74,7 +77,9 @@ void logPrintf(const char *fmt, ...)
     line[len++] = '\n';
 
     xSemaphoreTake(serialMutex, portMAX_DELAY);
-    HAL_UART_Transmit(&huart1, (uint8_t *)line, len, 100);
+    HAL_UART_Transmit(&huart1, reinterpret_cast<const uint8_t *>(line), len, 100);
+    // The cast is inside FreeRTOS's xSemaphoreGive macro, not in this code.
+    // cppcheck-suppress cstyleCast
     xSemaphoreGive(serialMutex);
 }
 

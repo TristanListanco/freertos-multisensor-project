@@ -60,13 +60,20 @@ extern QueueHandle_t modeQueue;
 #define EVENT_ALARM (1u << 2)
 extern EventGroupHandle_t systemEvents;
 
-// SystemState changes from MotionTask to DisplayTask. DisplayTask blocks on a
-// queue set, which can't include an event group, so MotionTask also sends each
-// change here (one slot, overwritten) to turn the OLED off or on.
-extern QueueHandle_t systemStateQueue;
+// SystemState changes from MotionTask, one queue per consumer: DisplayTask
+// turns the OLED off or on, AlarmTask silences or re-arms the buzzer. Both
+// consumers block on queue sets, which can't include an event group, so
+// MotionTask sends each change here as well as updating EVENT_ACTIVE. One slot
+// each, overwritten: only the latest state matters.
+extern QueueHandle_t displayStateQueue;
+extern QueueHandle_t alarmStateQueue;
 
-// Lets DisplayTask block on displayQueue, modeQueue and systemStateQueue at once.
+// Lets DisplayTask block on displayQueue, modeQueue and displayStateQueue at
+// once.
 extern QueueSetHandle_t displayEvents;
+
+// Lets AlarmTask block on alarmQueue and alarmStateQueue at once.
+extern QueueSetHandle_t alarmEvents;
 
 // Creates every object above. Returns false if any allocation failed.
 bool createRtosObjects(void);

@@ -47,6 +47,15 @@
       "top": 96,
       "left": -144,
       "attrs": {}
+    },
+    {
+      "type": "wokwi-buzzer",
+      "id": "bz1",
+      "top": 96,
+      "left": 480,
+      "attrs": {
+        "volume": "0.1"
+      }
     }
   ],
   "connections": [
@@ -160,6 +169,18 @@
       "pir1:OUT",
       "stm:A3",
       "green",
+      []
+    ],
+    [
+      "bz1:1",
+      "stm:GND.2",
+      "black",
+      []
+    ],
+    [
+      "bz1:2",
+      "stm:A6",
+      "red",
       []
     ]
   ]

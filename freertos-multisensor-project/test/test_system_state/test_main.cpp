@@ -1,5 +1,5 @@
 // Host-side unit tests for the ACTIVE/INACTIVE state machine (lab steps 32 and
-// 43). Run with: pio test -e native
+// 43). Run with: pio test
 
 #include <unity.h>
 #include "system_state.h"

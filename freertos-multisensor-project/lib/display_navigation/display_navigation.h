@@ -2,8 +2,7 @@
 #define DISPLAY_NAVIGATION_H
 
 // OLED pages and encoder navigation between them (lab steps 28-29). Pure
-// logic, unit tested on the host (test/test_display_navigation,
-// `pio test -e native`).
+// logic, unit tested on the host (test/test_display_navigation, `pio test`).
 
 // The page the OLED shows (lab step 28).
 enum class DisplayMode

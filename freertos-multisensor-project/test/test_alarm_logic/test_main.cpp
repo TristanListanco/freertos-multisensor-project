@@ -1,5 +1,5 @@
-// Host-side unit tests for the temperature alarm logic (lab steps 30 and 43).
-// Run with: pio test -e native
+// Host-side unit tests for the temperature alarm logic (lab steps 30 and 43,
+// FR-07). Run with: pio test
 //
 // The normal range is ALARM_LOW_TEMPERATURE_C (18.0) to ALARM_HIGH_TEMPERATURE_C
 // (30.0), inclusive. 0.1 C is the DHT22's resolution, so 17.9 and 30.1 are the
@@ -63,6 +63,36 @@ static void test_boundaries_as_built_from_dht22_tenths(void)
     ASSERT_STATE(AlarmState::HIGH_TEMPERATURE, evaluateTemperature(301 / 10.0f));
 }
 
+// The buzzer sounds for either kind of alarm while ACTIVE...
+static void test_buzzer_sounds_for_low_and_high_while_active(void)
+{
+    TEST_ASSERT_TRUE(alarmShouldSound(AlarmState::LOW_TEMPERATURE, true));
+    TEST_ASSERT_TRUE(alarmShouldSound(AlarmState::HIGH_TEMPERATURE, true));
+}
+
+// ...never for a normal temperature...
+static void test_buzzer_silent_for_normal_while_active(void)
+{
+    TEST_ASSERT_FALSE(alarmShouldSound(AlarmState::NORMAL, true));
+}
+
+// ...and never while INACTIVE, whatever the last reading was.
+static void test_buzzer_silent_while_inactive(void)
+{
+    TEST_ASSERT_FALSE(alarmShouldSound(AlarmState::NORMAL, false));
+    TEST_ASSERT_FALSE(alarmShouldSound(AlarmState::LOW_TEMPERATURE, false));
+    TEST_ASSERT_FALSE(alarmShouldSound(AlarmState::HIGH_TEMPERATURE, false));
+}
+
+// End to end: a reading above the limit while ACTIVE sounds the buzzer, and
+// the same reading after the system goes INACTIVE does not.
+static void test_hot_reading_sounds_only_while_active(void)
+{
+    AlarmState hot = evaluateTemperature(30.1f);
+    TEST_ASSERT_TRUE(alarmShouldSound(hot, true));
+    TEST_ASSERT_FALSE(alarmShouldSound(hot, false));
+}
+
 int main(int argc, char **argv)
 {
     UNITY_BEGIN();
@@ -73,5 +103,9 @@ int main(int argc, char **argv)
     RUN_TEST(test_above_upper_threshold_is_high);
     RUN_TEST(test_sensor_range_extremes);
     RUN_TEST(test_boundaries_as_built_from_dht22_tenths);
+    RUN_TEST(test_buzzer_sounds_for_low_and_high_while_active);
+    RUN_TEST(test_buzzer_silent_for_normal_while_active);
+    RUN_TEST(test_buzzer_silent_while_inactive);
+    RUN_TEST(test_hot_reading_sounds_only_while_active);
     return UNITY_END();
 }

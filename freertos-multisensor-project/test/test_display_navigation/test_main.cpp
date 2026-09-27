@@ -1,5 +1,5 @@
 // Host-side unit tests for encoder navigation between OLED pages (lab steps 29
-// and 43). Run with: pio test -e native
+// and 43). Run with: pio test
 
 #include <unity.h>
 #include "display_navigation.h"

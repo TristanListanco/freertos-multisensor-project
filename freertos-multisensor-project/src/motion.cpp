@@ -33,8 +33,8 @@ bool systemIsActive(void)
     return (xEventGroupGetBits(systemEvents) & EVENT_ACTIVE) != 0;
 }
 
-// Updates EVENT_ACTIVE and tells DisplayTask, in that order, so SensorTask and
-// InputTask see the new state before the OLED changes.
+// Updates EVENT_ACTIVE, then tells DisplayTask and AlarmTask, so SensorTask and
+// InputTask see the new state before the OLED or the buzzer changes.
 static void publishSystemState(SystemState state)
 {
     if (state == SystemState::ACTIVE)
@@ -45,7 +45,8 @@ static void publishSystemState(SystemState state)
     {
         xEventGroupClearBits(systemEvents, EVENT_ACTIVE);
     }
-    xQueueOverwrite(systemStateQueue, &state);
+    xQueueOverwrite(displayStateQueue, &state);
+    xQueueOverwrite(alarmStateQueue, &state);
 }
 
 // --- Motion Task Definition ---

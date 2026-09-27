@@ -13,6 +13,11 @@ AlarmState evaluateTemperature(float temperature)
     return AlarmState::NORMAL;
 }
 
+bool alarmShouldSound(AlarmState state, bool systemActive)
+{
+    return systemActive && state != AlarmState::NORMAL;
+}
+
 const char *alarmStateName(AlarmState state)
 {
     switch (state)

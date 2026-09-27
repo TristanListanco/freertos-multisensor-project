@@ -98,7 +98,7 @@ void DisplayTask(void *pvParameters)
         }
         else
         {
-            xQueueReceive(systemStateQueue, &systemState, 0);
+            xQueueReceive(displayStateQueue, &systemState, 0);
             if (oledReady &&
                 ssd1306SetDisplayOn(systemState == SystemState::ACTIVE) != HAL_OK)
             {

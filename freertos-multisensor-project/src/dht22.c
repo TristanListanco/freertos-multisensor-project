@@ -41,7 +41,7 @@ static void setPinMode(uint32_t mode)
 static uint32_t pulseLength(uint32_t level)
 {
     uint32_t count = 0;
-    while ((DHT22_PORT->IDR & DHT22_PIN ? 1u : 0u) == level)
+    while (((DHT22_PORT->IDR & DHT22_PIN) != 0u ? 1u : 0u) == level)
     {
         if (++count >= DHT22_TIMEOUT_LOOPS)
         {
